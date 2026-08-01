@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Nosdag — your notes, on your own node</title>
-<meta name="description" content="A peer-to-peer desktop social network. Nostr keys for identity, an IPFS node in the app for your data, Monero tips, and an anonymous Tor mode.">
+<title>Nosdag — a Nostr client that keeps your data on your own node</title>
+<meta name="description" content="A desktop Nostr client. Your npub, your follows, your relays — plus an IPFS node in the app so your notes and media live on your machine. Monero tips and an anonymous Tor mode included.">
 <link rel="icon" href="nosdag-icon.png">
-<meta property="og:title" content="Nosdag — your notes, on your own node">
-<meta property="og:description" content="A peer-to-peer desktop social network. Nostr keys for identity, an IPFS node in the app for your data, Monero tips, and an anonymous Tor mode.">
+<meta property="og:title" content="Nosdag — a Nostr client that keeps your data on your own node">
+<meta property="og:description" content="A desktop Nostr client. Your npub, your follows, your relays — plus an IPFS node in the app so your notes and media live on your machine. Monero tips and an anonymous Tor mode included.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://nosdag.com/">
 <style>
@@ -143,6 +143,8 @@ section{padding:64px 0}
 }
 .card h3{font-size:18.5px; margin:9px 0 8px}
 .card p{margin:0; font-size:15.5px; color:var(--dim)}
+/* an odd final card spans the row rather than sitting orphaned beside a gap */
+.cards .card:last-child:nth-child(odd){grid-column:1 / -1}
 
 /* ---- terminal ---- */
 .steps{counter-reset:step; list-style:none; padding:0; margin:0}
@@ -233,10 +235,11 @@ footer .sp{margin-left:auto}
 <section class="hero">
   <div class="wrap hero-grid">
     <div>
-      <p class="micro">Peer-to-peer · desktop</p>
-      <h1>Your notes, on your own node.</h1>
-      <p class="lede">Nosdag is a desktop social network built on Nostr keys and an IPFS node that
-        runs inside the app. Relays carry pointers. Your machine carries your data.</p>
+      <p class="micro">Nostr client · desktop</p>
+      <h1>A Nostr client that keeps your data on your own node.</h1>
+      <p class="lede">Bring the npub you already have. Nosdag speaks ordinary Nostr — your follows,
+        your relays, your notes readable in every other client — and adds an IPFS node inside the
+        app so the data itself lives on your machine instead of somebody's server.</p>
       <div class="cta">
         <a class="btn" href="#run">Run it from source</a>
         <a class="btn btn-quiet" href="https://github.com/grahamonero/nosdag-pub/releases">Releases</a>
@@ -262,8 +265,9 @@ footer .sp{margin-left:auto}
         <div class="cid">bafyreif8ld…3vha</div>
         <div class="prev">genesis</div>
       </article>
-      <p class="ledger-note">Every note links to the one before it, by content address. Pin the
-        newest and you have replicated the whole history — verifiable against your key, by anyone.</p>
+      <p class="ledger-note">Ordinary Nostr events on relays — and on your node, each one linked to
+        the note before it by content address. Pin the newest and you have replicated the whole
+        history, verifiable against your key by anyone.</p>
     </div>
   </div>
 </section>
@@ -274,16 +278,24 @@ footer .sp{margin-left:auto}
   <div class="wrap">
     <div class="sec-head rv">
       <p class="micro">What it is</p>
-      <h2>A social network that doesn't need a server</h2>
-      <p>Nostr gives you an identity nobody can revoke. Nosdag adds the missing half: somewhere for
-        your data to live that is also yours. That turns out to change what the app can offer.</p>
+      <h2>Nostr, with somewhere for the data to live</h2>
+      <p>Nostr already gives you an identity nobody can revoke and a network nobody owns. What it
+        leaves open is where your notes and media actually sit — in practice, on relays and image
+        hosts run by other people. Nosdag answers that half without changing the protocol you're
+        already on.</p>
     </div>
     <div class="cards">
       <div class="card rv">
+        <p class="micro">Compatibility</p>
+        <h3>The npub you already have</h3>
+        <p>Import your key and your follows come with you. You post normal signed events to normal
+          relays, and people on other clients read you as usual. Nothing here is a walled garden.</p>
+      </div>
+      <div class="card rv">
         <p class="micro">Storage</p>
         <h3>An IPFS node in the app</h3>
-        <p>Notes, media, and long-form all live on a node running on your machine, addressed by
-          content. Relays shrink to kilobyte pointer databases.</p>
+        <p>Notes, media, and long-form also live on a node running on your machine, addressed by
+          content — so a relay going down doesn't take your history with it.</p>
       </div>
       <div class="card rv">
         <p class="micro">Payments</p>
@@ -383,8 +395,8 @@ cd nosdag-pub</pre>
       <details>
         <summary>Are my notes private?</summary>
         <div class="a">
-          <p>Your notes are public and signed, the same as on any Nostr client. Anyone can read
-            them and verify they came from your key. That is the point of the format.</p>
+          <p>No more than on any other Nostr client. Your notes are public and signed — anyone can
+            read them and verify they came from your key. That is the point of the format.</p>
           <p>What Nosdag protects is different: anonymous mode hides your IP and location from
             relays and peers, Monero keeps payment amounts and addresses off a public ledger, and
             direct messages are encrypted. If you need the <em>content</em> of a note to be
@@ -403,13 +415,26 @@ cd nosdag-pub</pre>
         </div>
       </details>
       <details>
-        <summary>Is this a Nostr client, or something else?</summary>
+        <summary>Will my existing account and follows work?</summary>
         <div class="a">
-          <p>Both. Nosdag speaks ordinary Nostr — you follow people on relays, your notes are
-            normal signed events, and other clients can read you. On top of that it keeps a
-            content-addressed copy of your history on IPFS and publishes a pointer to it, which is
-            what makes the chain in the hero above possible.</p>
-          <p>You keep the same npub you already have. Bring your key with you.</p>
+          <p>Yes. Paste your nsec at sign-in and your profile, follow list, and relays come with
+            you — they live on relays, not in any one client. Post from Nosdag and people reading
+            you in Damus, Amethyst, or anything else see your notes normally.</p>
+          <p>Sign in with an Amber bunker if you would rather not paste a key. Browser-extension
+            signing is not available, because a desktop app has no browser extension to talk to.</p>
+        </div>
+      </details>
+      <details>
+        <summary>What does Nosdag add on top of plain Nostr?</summary>
+        <div class="a">
+          <p>A place for the data. Alongside the usual relay event, each note is stored on the IPFS
+            node inside the app as a signed object that links to your previous one, and a small
+            pointer on relays says where the newest one is. Anyone can follow that pointer and pull
+            your whole history, verified against your key.</p>
+          <p>That is what makes the rest possible: media served from your node instead of an image
+            host, long-form and history that survive relays dropping your events, and a portable
+            archive you can back up as one file. It uses standard Nostr event kinds to do it, so
+            nothing here breaks other clients.</p>
         </div>
       </details>
       <details>
@@ -476,7 +501,7 @@ cd nosdag-pub</pre>
     <a href="https://github.com/grahamonero/nosdag-pub">Source</a>
     <a href="https://github.com/grahamonero/nosdag-pub/releases">Releases</a>
     <a href="https://github.com/grahamonero/nosdag-pub/blob/main/LICENSE">MIT licence</a>
-    <span class="sp">Nostr keys · IPFS · Monero</span>
+    <span class="sp">A Nostr client · IPFS · Monero</span>
   </div>
 </footer>
 
