@@ -1,0 +1,734 @@
+/* ============================================================================
+   Nosdag theme overlay — "The Ledger" (dark, default) · "The Press" (light)
+   Loaded AFTER styles.css; restyles the existing Nosmero components in place.
+   Pure visual layer (no DOM changes). Rides the app's existing data-theme
+   attribute (js/ui/theme.js): dark = a notarial record book — warm ink,
+   sealing-wax red, gilt numbers, double-ruled entries; light = a one-person
+   printing house — paper, hard ink lines, one spot color, rubber stamps.
+   Both set in Alegreya Sans (human) + JetBrains Mono (machine); the copy keeps
+   Nosdag's normal Nostr/IPFS vocabulary — the metaphors are visual only.
+   ============================================================================ */
+
+/* ============================ tokens ============================ */
+
+:root{
+  /* — The Ledger — */
+  --nd-ground:#171310;
+  --nd-card:#1e1914;
+  --nd-card2:#241e17;
+  --nd-txt:#ECE3D2;
+  --nd-body-ink:#e6dcc8;
+  --nd-dim:#b3a78e;
+  --nd-mute:#7d7261;
+  --nd-accent:#C5402E;                 /* sealing wax */
+  --nd-accent-hi:#e0654f;
+  --nd-accent-deep:#8f2b1e;
+  --nd-accent-soft:rgba(197,64,46,.16);
+  --nd-on-accent:#f6ead9;
+  --nd-gilt:#B08D57;                   /* numbers, micro-labels, group headers */
+  --nd-line:rgba(232,224,208,.12);
+  --nd-line-2:rgba(232,224,208,.22);
+  --nd-ok:#7ca66a;
+  --nd-rest:#c9973f;
+  --nd-down:#cf5b4c;
+  --nd-radius:3px;
+  --nd-card-border:1px solid var(--nd-line);
+  --nd-card-top:3px double var(--nd-line-2);
+  --nd-card-shadow:none;
+  --nd-rule:1px solid var(--nd-line-2);
+  --nd-sans:'Alegreya Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --nd-mono:'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace;
+
+  /* compat aliases — module-injected styles reference these */
+  --nd-orange:var(--nd-accent);
+  --nd-seeded:var(--nd-ok);
+
+  /* retint the reused Nosmero variable system (styles.css) to the Ledger ramp */
+  --monero-orange:var(--nd-accent);
+  --dark-bg:var(--nd-ground);
+  --darker-bg:#120f0c;
+  --card-bg:var(--nd-card);
+  --card-hover:#282219;
+  --text-primary:var(--nd-txt);
+  --text-secondary:var(--nd-dim);
+  --text-muted:var(--nd-mute);
+  --border-color:var(--nd-line);
+  --border-hover:var(--nd-line-2);
+  --success:var(--nd-ok);
+  --danger:var(--nd-down);
+  --warning:var(--nd-rest);
+  --purple:var(--nd-gilt);             /* purple retires; anything left goes gilt */
+  --bg-primary:#14110e;
+  --bg-secondary:var(--nd-ground);
+  --bg-tertiary:var(--nd-card2);
+  --bg-elevated:var(--nd-card2);
+  --bg-input:#14110e;
+  --bg-hover:#2a231b;
+  --bg-modal:var(--nd-card);
+  --text-inverse:#171310;
+  --border-primary:#3a322a;
+  --border-secondary:#463c31;
+  --border-focus:#6b5d4c;
+  --header-bg:rgba(23,19,16,.97);
+  --skeleton-base:#241e17;
+  --skeleton-highlight:#2e2620;
+}
+
+[data-theme="light"]{
+  /* — The Press — */
+  --nd-ground:#ECE9E2;
+  --nd-card:#F7F4EC;
+  --nd-card2:#ECE9E2;
+  --nd-txt:#17161A;
+  --nd-body-ink:#17161A;
+  --nd-dim:rgba(23,22,26,.55);
+  --nd-mute:rgba(23,22,26,.45);
+  --nd-accent:#2456B3;                 /* stamp blue — official ink on paper */
+  --nd-accent-hi:#4a7dd6;
+  --nd-accent-deep:#183f85;
+  --nd-accent-soft:rgba(36,86,179,.12);
+  --nd-on-accent:#F7F4EC;
+  --nd-gilt:rgba(23,22,26,.55);        /* gilt has no place on paper — micro-labels go ink-soft */
+  --nd-line:rgba(23,22,26,.2);
+  --nd-line-2:rgba(23,22,26,.45);
+  --nd-ok:#2e7d4a;
+  --nd-rest:#a06a10;
+  --nd-down:#c0392b;
+  --nd-radius:2px;
+  --nd-card-border:2px solid #17161A;
+  --nd-card-top:2px solid #17161A;
+  --nd-card-shadow:5px 5px 0 rgba(23,22,26,.14);
+  --nd-rule:2px solid #17161A;
+
+  --dark-bg:var(--nd-ground);
+  --darker-bg:#e4e0d6;
+  --card-bg:var(--nd-card);
+  --card-hover:#f0ece2;
+  --text-primary:var(--nd-txt);
+  --text-secondary:rgba(23,22,26,.65);
+  --text-muted:var(--nd-mute);
+  --border-color:var(--nd-line);
+  --border-hover:rgba(23,22,26,.45);
+  --purple:var(--nd-accent);
+  --bg-primary:var(--nd-ground);
+  --bg-secondary:#f1eee6;
+  --bg-tertiary:#e4e0d6;
+  --bg-elevated:var(--nd-card);
+  --bg-input:var(--nd-card);
+  --bg-hover:#e4e0d6;
+  --bg-modal:var(--nd-card);
+  --text-inverse:#F7F4EC;
+  --border-primary:#c9c4b7;
+  --border-secondary:#d6d1c5;
+  --border-focus:#17161A;
+  --header-bg:rgba(236,233,226,.97);
+  --skeleton-base:#e0dccf;
+  --skeleton-highlight:#eeeade;
+}
+
+/* ============================ ground ============================ */
+
+body{
+  font-family:var(--nd-sans) !important;
+  background:var(--nd-ground) !important;   /* flat ink / flat paper — the aurora retires */
+  -webkit-font-smoothing:antialiased;
+}
+/* the operator grid retires */
+body::before{ content:none; }
+.app-container{ position:relative; z-index:1; }
+
+/* ============================ top header ============================ */
+
+.minimal-header{
+  background:var(--header-bg) !important;
+  -webkit-backdrop-filter:none; backdrop-filter:none;
+  border-bottom:var(--nd-rule) !important;
+}
+/* wordmark: solid ink (the inline gradient clip is overridden); the Press
+   misregisters it with a spot-color shadow, like a two-ink print */
+.logo-container .tagline{
+  background:none !important;
+  -webkit-text-fill-color:var(--nd-txt);
+  color:var(--nd-txt) !important;
+  font-weight:800 !important;
+}
+[data-theme="light"] .logo-container .tagline{
+  color:var(--nd-accent) !important;
+  -webkit-text-fill-color:var(--nd-accent);
+}
+
+/* Settings and the article composer are full-page overlays that are
+   position:fixed/top:0, so they collide with the fixed top bar (.app-container
+   is a stacking context that traps their z-index under the root-level header).
+   Keep them below the 70px top bar + 1px hairline. */
+.settings-page,
+.compose-article-page{
+  top:71px;
+  height:auto;
+}
+.messages-page{ height:100%; }
+
+/* feed tabs sit at the top of the feed column (.main), sticky over the scroll */
+.feed-selector{
+  position:sticky; top:0; z-index:15;
+  background:var(--nd-ground);
+  padding:10px 16px;
+  border-bottom:1px solid var(--nd-line);
+  gap:8px;
+}
+.feed-tab{
+  font-family:var(--nd-mono) !important;
+  font-size:12.5px !important;
+  color:var(--nd-dim) !important; border-radius:var(--nd-radius) !important;
+  transition:.15s;
+}
+.feed-tab:hover{ color:var(--nd-txt) !important; }
+.feed-tab.active{ color:var(--nd-txt) !important; background:var(--nd-accent-soft) !important; }
+[data-theme="light"] .feed-tab{
+  background:transparent !important;
+  border:2px solid transparent !important;
+}
+[data-theme="light"] .feed-tab:hover{ border-color:var(--nd-line) !important; }
+[data-theme="light"] .feed-tab.active{
+  border-color:#17161A !important;
+  background:var(--nd-card) !important;
+  box-shadow:3px 3px 0 var(--nd-accent);
+  font-weight:700;
+}
+
+/* rail cluster dividers (double rule in the Ledger, hard ink line in the Press) */
+.nd-rail-rule{ border-top:var(--nd-card-top); margin:14px 10px; }
+
+/* My Node — tabbed composition of the node panel, media library, and hosted follows */
+.nd-mn-head{ display:flex; align-items:center; gap:12px; padding:18px 16px 0; }
+.nd-mn-title{ font-size:22px; margin:0; }
+.nd-mn-head .nd-back{
+  background:transparent; border:1px solid var(--nd-line); border-radius:var(--nd-radius);
+  color:var(--nd-dim); padding:4px 10px; cursor:pointer; font-size:16px;
+}
+.nd-mn-head .nd-back:hover{ color:var(--nd-txt); border-color:var(--nd-line-2); }
+.nd-mn-tabs{
+  display:flex; gap:8px; padding:12px 16px;
+  border-bottom:1px solid var(--nd-line);
+  position:sticky; top:0; z-index:15; background:var(--nd-ground);
+}
+.nd-mn-tab{
+  font-family:var(--nd-mono); font-size:12.5px; color:var(--nd-dim);
+  background:transparent; border:1px solid var(--nd-line); border-radius:var(--nd-radius);
+  padding:.45rem .9rem; cursor:pointer; transition:.15s;
+}
+.nd-mn-tab:hover{ color:var(--nd-txt); }
+.nd-mn-tab.on{ color:var(--nd-txt); background:var(--nd-accent-soft); border-color:transparent; }
+[data-theme="light"] .nd-mn-tab{ border:2px solid transparent; }
+[data-theme="light"] .nd-mn-tab:hover{ border-color:var(--nd-line); }
+[data-theme="light"] .nd-mn-tab.on{
+  border-color:#17161A; background:var(--nd-card);
+  box-shadow:3px 3px 0 var(--nd-accent); font-weight:700;
+}
+.nd-mn-gate{
+  margin:24px 16px; padding:20px;
+  border:var(--nd-card-border); border-top:var(--nd-card-top); box-shadow:var(--nd-card-shadow);
+  background:var(--nd-card); color:var(--nd-dim); border-radius:var(--nd-radius);
+}
+/* the composed renderers keep their standalone page headers; hide them inside the tabbed page */
+.nd-mn .nd-node .nd-head{ display:none; }
+.nd-mn .nd-ml-top{ display:none; }
+.nd-mn .hf-head{ display:none; }
+
+/* primary action buttons: flat wax block / ink block with a spot offset */
+.create-note-btn, #headerCreateNoteBtn, .send-btn{
+  font-family:var(--nd-sans) !important; font-weight:700 !important;
+  background:var(--nd-accent) !important;
+  color:var(--nd-on-accent) !important; border:none !important;
+  border-radius:var(--nd-radius) !important;
+  box-shadow:none !important;
+  transition:filter .15s, box-shadow .15s;
+}
+.create-note-btn:hover, #headerCreateNoteBtn:hover, .send-btn:hover{ filter:brightness(1.1); }
+/* the top-bar Post button stays a flat block in both worlds (no offset shadow) */
+[data-theme="light"] .send-btn{
+  background:var(--nd-accent) !important; color:var(--nd-on-accent) !important;
+  box-shadow:3px 3px 0 var(--nd-accent-deep) !important;
+}
+/* auth pair follows the same language */
+.create-account-btn, .login-btn-orange{
+  background:var(--nd-accent) !important; color:var(--nd-on-accent) !important;
+  border:none !important; border-radius:var(--nd-radius) !important;
+  font-family:var(--nd-sans) !important; font-weight:700 !important;
+}
+[data-theme="light"] .create-account-btn,
+[data-theme="light"] .login-btn-orange{
+  background:var(--nd-accent) !important; color:var(--nd-on-accent) !important;
+  box-shadow:3px 3px 0 var(--nd-accent-deep) !important;
+}
+
+/* header net-chip */
+#ndNetChip{ font-family:var(--nd-mono); font-size:11px; color:var(--nd-dim); border:1px solid var(--nd-line-2);
+  border-radius:var(--nd-radius); padding:6px 12px; display:inline-flex; align-items:center; gap:8px;
+  background:transparent; margin-left:auto; letter-spacing:.03em; }
+#ndNetChip::before{ content:''; width:7px; height:7px; border-radius:50%; background:var(--nd-ok); }
+#ndNetChip[data-s="boot"]::before{ background:var(--nd-rest); }
+#ndNetChip[data-s="down"]::before{ background:var(--nd-down); }
+
+/* ============================ feed cards → ledger entries / printed leaves ============================ */
+
+.post{
+  background:var(--nd-card) !important;
+  -webkit-backdrop-filter:none; backdrop-filter:none;
+  border:var(--nd-card-border) !important;
+  border-top:var(--nd-card-top) !important;
+  border-radius:var(--nd-radius) !important;
+  box-shadow:var(--nd-card-shadow) !important;
+  margin-bottom:18px !important; padding:16px 20px !important;
+  transition:border-color .15s;
+}
+.post:hover{ border-color:var(--nd-line-2) !important; }
+[data-theme="light"] .post:hover{ border-color:#17161A !important; }
+.avatar, .embedded-note .note-avatar{ border-radius:var(--nd-radius) !important; }
+.username{ font-weight:700 !important; letter-spacing:0; font-size:15.5px !important; }
+.handle, .timestamp{
+  font-family:var(--nd-mono) !important; font-size:11px !important; color:var(--nd-mute) !important;
+}
+.handle:hover{ color:var(--nd-accent) !important; }
+.post-content{ font-size:15.5px !important; line-height:1.66 !important; color:var(--nd-body-ink) !important; }
+
+/* action row — machine controls under a rule */
+.post-actions{ gap:18px !important; padding-top:9px !important; border-top:1px solid var(--nd-line) !important; margin-top:12px !important; }
+.action-btn{
+  font-family:var(--nd-mono) !important; font-size:12px !important;
+  color:var(--nd-dim) !important; transition:.15s;
+}
+.action-btn:hover{ color:var(--nd-txt) !important; }
+.action-btn.xmr-zap:hover{ color:var(--nd-accent) !important; }
+.xmr-zap:hover{ color:var(--nd-accent) !important; }
+.reply-count, .repost-count, .like-count{ color:var(--nd-mute) !important; }
+
+/* pre-existing purple sites in the lifted sheet → the current language */
+.nav-item.active{ background:var(--nd-accent-soft) !important; color:var(--nd-txt) !important; }
+.post-button{ background:var(--nd-accent) !important; color:var(--nd-on-accent) !important; }
+[data-theme="light"] .post-button{ background:var(--nd-accent) !important; color:var(--nd-on-accent) !important; box-shadow:3px 3px 0 var(--nd-accent-deep) !important; }
+
+/* ============================ compose ============================ */
+
+.compose-area{
+  background:var(--nd-card) !important;
+  -webkit-backdrop-filter:none; backdrop-filter:none;
+  border:var(--nd-card-border) !important;
+  border-top:var(--nd-card-top) !important;
+  border-radius:var(--nd-radius) !important;
+  box-shadow:var(--nd-card-shadow) !important;
+}
+
+/* ============================ left rail ============================ */
+
+.nd-rail{
+  flex:0 0 216px; width:216px; overflow-y:auto;
+  border-right:1px solid var(--nd-line); padding:18px 12px;
+  background:transparent;
+  -webkit-backdrop-filter:none; backdrop-filter:none;
+}
+.nd-rail-grp{
+  font-family:var(--nd-mono); font-size:9px; letter-spacing:.2em; text-transform:uppercase;
+  color:var(--nd-gilt); padding:16px 12px 7px; font-weight:500;
+}
+.nd-rail-grp:first-child{ padding-top:2px; }
+.nd-nav{
+  display:flex; align-items:center; gap:11px; padding:8px 12px;
+  border-left:2px solid transparent; border-radius:0;
+  color:var(--nd-dim); font-size:14.5px; cursor:pointer; transition:.15s; user-select:none;
+}
+.nd-nav .i{ width:18px; text-align:center; opacity:.85; font-size:14px; }
+.nd-nav:hover{ color:var(--nd-txt); }
+.nd-nav.on{
+  color:var(--nd-txt);
+  border-left-color:var(--nd-accent);
+  background:linear-gradient(90deg,var(--nd-accent-soft),transparent);
+  box-shadow:none;
+}
+.nd-nav.on .i{ filter:none; }
+[data-theme="light"] .nd-nav{ border:2px solid transparent; padding:6px 10px; color:var(--nd-txt); }
+[data-theme="light"] .nd-nav:hover{ border-color:var(--nd-line); }
+[data-theme="light"] .nd-nav.on{
+  border-color:#17161A; background:var(--nd-card);
+  box-shadow:3px 3px 0 var(--nd-accent); font-weight:700;
+}
+.nd-nav-badge{
+  margin-left:auto; font-family:var(--nd-mono); font-size:10.5px; font-weight:700; letter-spacing:0; line-height:1;
+  min-width:18px; height:18px; padding:0 6px; border-radius:var(--nd-radius);
+  display:inline-flex; align-items:center; justify-content:center;
+  background:var(--nd-accent); color:var(--nd-on-accent); box-shadow:none;
+}
+
+/* ============================ right panel → the deck ============================ */
+
+.right-panel{
+  border-left:1px solid var(--nd-line) !important;
+  background:transparent !important;
+}
+[data-theme="light"] .right-panel{ border-left:2px solid #17161A !important; }
+.right-panel-header h3, #rightPanelTitle{
+  font-family:var(--nd-mono) !important; font-size:10px !important;
+  letter-spacing:.18em; text-transform:uppercase; color:var(--nd-gilt) !important;
+}
+
+.nd-deck{ padding:14px; }
+.nd-deck-panel{
+  background:var(--nd-card);
+  -webkit-backdrop-filter:none; backdrop-filter:none;
+  border:var(--nd-card-border); border-top:var(--nd-card-top);
+  border-radius:var(--nd-radius); padding:15px 16px; margin-bottom:16px;
+  box-shadow:var(--nd-card-shadow);
+}
+.nd-deck-h{ font-family:var(--nd-mono); font-size:9.5px; letter-spacing:.2em; text-transform:uppercase;
+  color:var(--nd-gilt); font-weight:500; margin:0 0 13px; }
+[data-theme="light"] .nd-deck-h{
+  font-family:var(--nd-sans); font-size:11px; letter-spacing:.06em; font-weight:800; color:var(--nd-txt);
+  padding-bottom:8px; border-bottom:2px solid #17161A;
+}
+.nd-deck-node{ display:flex; align-items:center; gap:13px; margin-bottom:15px; }
+
+/* the node mark: a wax seal that carries node status by color */
+.nd-deck-orb{ width:40px; height:40px; border-radius:50%; flex:none; display:grid; place-items:center; position:relative; color:var(--nd-ok); }
+.nd-deck-orb[data-s="boot"]{ color:var(--nd-rest); } .nd-deck-orb[data-s="down"]{ color:var(--nd-down); }
+.nd-deck-orb i{
+  width:22px; height:22px; border-radius:50%;
+  background:radial-gradient(circle at 34% 30%, color-mix(in srgb, currentColor 75%, #fff), currentColor 58%, color-mix(in srgb, currentColor 55%, #000));
+  box-shadow:0 1px 4px rgba(0,0,0,.4), inset 0 -1px 2px rgba(0,0,0,.3);
+}
+[data-theme="light"] .nd-deck-orb i{ box-shadow:0 1px 3px rgba(23,22,26,.35), inset 0 -1px 2px rgba(23,22,26,.2); }
+.nd-deck-orb::before{ content:''; position:absolute; width:40px; height:40px; border-radius:50%; border:1.5px solid currentColor; opacity:.35; animation:nd-deck-pulse 2.6s ease-out infinite; }
+.nd-deck-orb[data-s="down"]::before{ animation-play-state:paused; opacity:.15; }
+@keyframes nd-deck-pulse{ 0%{transform:scale(.5);opacity:.5} 100%{transform:scale(1.25);opacity:0} }
+@media (prefers-reduced-motion: reduce){ .nd-deck-orb::before{ animation:none; } }
+
+.nd-deck-id b{ display:block; font-size:15px; color:var(--nd-txt); }
+.nd-deck-id .nd-mono{ font-family:var(--nd-mono); font-size:10.5px; color:var(--nd-dim); margin-top:3px; display:block; }
+.nd-deck-stats{ display:grid; grid-template-columns:1fr 1fr; gap:9px; }
+.nd-deck-stat{ border:1px solid var(--nd-line); border-radius:var(--nd-radius); padding:10px 12px; background:transparent; }
+[data-theme="light"] .nd-deck-stat{ border:1px solid var(--nd-line-2); background:var(--nd-card); }
+.nd-deck-stat .v{ font-family:var(--nd-mono); font-size:16px; font-weight:700; color:var(--nd-txt); font-variant-numeric:tabular-nums; }
+.nd-deck-stat.peers .v{ color:var(--nd-gilt); }
+[data-theme="light"] .nd-deck-stat.peers .v{ color:var(--nd-accent); }
+.nd-deck-stat .k{ font-size:9px; font-family:var(--nd-mono); letter-spacing:.08em; text-transform:uppercase; color:var(--nd-mute); margin-top:5px; }
+.nd-host{ display:flex; align-items:center; gap:9px; font-size:13px; color:var(--nd-dim); }
+.nd-host-b{ font-family:var(--nd-mono); font-size:9.5px; color:var(--nd-gilt); border:1px solid var(--nd-line-2); border-radius:var(--nd-radius); padding:2px 7px; letter-spacing:.06em; }
+.nd-deck-note{ font-size:12px; line-height:1.55; color:var(--nd-mute); margin:11px 0 0; }
+.nd-miniswarm{ height:56px; border-radius:var(--nd-radius); border:1px solid var(--nd-line); margin-top:12px; position:relative; overflow:hidden; background:var(--nd-card2); }
+.nd-miniswarm span{ position:absolute; width:5px; height:5px; border-radius:50%; background:var(--nd-gilt); box-shadow:none; }
+[data-theme="light"] .nd-miniswarm span{ background:var(--nd-accent); }
+
+/* anonymous sign-in prompt */
+.nd-deck-orb[data-s="off"]{ color:var(--nd-mute); }
+.nd-deck-orb[data-s="off"]::before{ animation-play-state:paused; opacity:.15; }
+.nd-deck-signin{ text-align:center; }
+.nd-deck-signin .nd-deck-orb{ margin:4px auto 14px; }
+.nd-deck-signin .nd-deck-h{ text-align:center; margin-bottom:10px; }
+.nd-deck-signin .nd-deck-note{ margin:0; }
+.nd-deck-signin-btn{ margin-top:15px; width:100%; padding:11px; border-radius:var(--nd-radius); border:none; cursor:pointer;
+  font-family:var(--nd-sans); font-weight:700; font-size:13.5px; color:var(--nd-on-accent);
+  background:var(--nd-accent); box-shadow:none; }
+[data-theme="light"] .nd-deck-signin-btn{ background:var(--nd-accent); color:var(--nd-on-accent); box-shadow:3px 3px 0 var(--nd-accent-deep); }
+
+/* clickable "notes in IPFS" stat */
+.nd-deck-stat.nd-clickable{ cursor:pointer; transition:.15s; }
+.nd-deck-stat.nd-clickable:hover{ border-color:var(--nd-accent); box-shadow:none; }
+
+/* ============================ IPFS marks: seals (dark) · stamps (light) ============================ */
+
+/* feed-card chip: this content is signed + held in the swarm. The Ledger seals it
+   in gilt with a wax dot; the Press stamps it in spot ink. */
+.nd-ipfs-chip{
+  font-family:var(--nd-mono); font-size:10px; color:var(--nd-gilt);
+  border:1px solid var(--nd-line-2); border-radius:var(--nd-radius); padding:1px 6px; margin-left:8px;
+  letter-spacing:.06em; vertical-align:middle; cursor:pointer; white-space:nowrap; transition:.12s;
+  display:inline-flex; align-items:center; gap:5px;
+}
+.nd-ipfs-chip::before{
+  content:''; width:7px; height:7px; border-radius:50%; flex:none;
+  background:radial-gradient(circle at 34% 30%, var(--nd-accent-hi), var(--nd-accent) 58%, var(--nd-accent-deep));
+}
+.nd-ipfs-chip:hover{ background:var(--nd-accent-soft); }
+[data-theme="light"] .nd-ipfs-chip{
+  color:var(--nd-accent); border:2px solid var(--nd-accent); border-radius:1px;
+  font-weight:700; text-transform:uppercase; letter-spacing:.1em; transform:rotate(-1.5deg);
+}
+[data-theme="light"] .nd-ipfs-chip::before{ content:none; }
+
+.nd-ipfsnote-badge{ color:var(--nd-gilt); border:1px solid var(--nd-line-2); border-radius:var(--nd-radius); padding:2px 7px; }
+[data-theme="light"] .nd-ipfsnote-badge{ color:var(--nd-accent); border:2px solid var(--nd-accent); border-radius:1px; font-weight:700; text-transform:uppercase; }
+
+/* "your notes, read from IPFS" modal */
+.nd-ipfsnotes-overlay{ position:fixed; inset:0; z-index:9999; background:rgba(10,8,6,.72);
+  -webkit-backdrop-filter:none; backdrop-filter:none; display:flex; align-items:center; justify-content:center; }
+[data-theme="light"] .nd-ipfsnotes-overlay{ background:rgba(23,22,26,.4); }
+.nd-ipfsnotes{ width:min(680px,92vw); max-height:84vh; display:flex; flex-direction:column;
+  background:var(--nd-card);
+  border:var(--nd-card-border); border-top:var(--nd-card-top);
+  border-radius:var(--nd-radius); box-shadow:var(--nd-card-shadow); overflow:hidden; }
+.nd-ipfsnotes-top{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:18px 20px; border-bottom:1px solid var(--nd-line); }
+.nd-ipfsnotes-title{ font-weight:800; font-size:16px; color:var(--nd-txt); }
+.nd-ipfsnotes-sub{ font-family:var(--nd-mono); font-size:10.5px; color:var(--nd-mute); margin-top:3px; }
+.nd-ipfsnotes-close{ background:none; border:1px solid var(--nd-line-2); border-radius:var(--nd-radius); color:var(--nd-dim); width:30px; height:30px; cursor:pointer; flex:none; }
+.nd-ipfsnotes-close:hover{ color:var(--nd-txt); border-color:var(--nd-accent); }
+.nd-ipfsnotes-body{ overflow-y:auto; padding:16px 20px 22px; }
+.nd-ipfsnotes-status{ color:var(--nd-dim); font-family:var(--nd-mono); font-size:12.5px; padding:30px 0; text-align:center; }
+.nd-ipfsnotes-count{ font-family:var(--nd-mono); font-size:10.5px; color:var(--nd-ok); margin-bottom:14px; letter-spacing:.04em; }
+.nd-ipfsnote-note{ border:1px solid var(--nd-line); border-radius:var(--nd-radius); background:var(--nd-card2); padding:14px 16px; margin-bottom:12px; }
+[data-theme="light"] .nd-ipfsnote-note{ border:1px solid var(--nd-line-2); background:var(--nd-card); }
+.nd-ipfsnote-meta{ display:flex; align-items:center; gap:10px; font-family:var(--nd-mono); font-size:10.5px; color:var(--nd-mute); margin-bottom:8px; }
+.nd-ipfsnote-content{ font-size:14.5px; line-height:1.62; color:var(--nd-body-ink); word-wrap:break-word; }
+.nd-ipfsnote-content img{ max-width:100%; border-radius:var(--nd-radius); }
+.nd-ipfsnote-cid{ font-family:var(--nd-mono); font-size:10.5px; color:var(--nd-mute); margin-top:10px; cursor:pointer; }
+.nd-ipfsnote-cid:hover{ color:var(--nd-accent); }
+
+/* ===== Requests panel (stranger replies awaiting review) ===== */
+.nd-req .nd-deck-h{ display:flex; align-items:center; gap:8px; margin-bottom:11px; }
+.nd-req-n{
+  font-family:var(--nd-mono); font-size:10px; font-weight:700; color:var(--nd-on-accent);
+  background:var(--nd-accent); border-radius:var(--nd-radius); min-width:18px; height:16px; padding:0 6px;
+  display:inline-flex; align-items:center; justify-content:center; box-shadow:none;
+}
+.nd-req-n[data-zero="1"]{ background:transparent; color:var(--nd-mute); border:1px solid var(--nd-line); }
+.nd-req-auto{ font-family:var(--nd-mono); font-size:10.5px; color:var(--nd-ok); letter-spacing:.02em; margin:0 0 10px; }
+.nd-req-hint{ font-size:11.5px; line-height:1.5; color:var(--nd-mute); margin:0 0 11px; }
+.nd-req-list{ display:flex; flex-direction:column; gap:9px; }
+.nd-req-item{ border:1px solid var(--nd-line); border-radius:var(--nd-radius); background:var(--nd-card2); padding:11px 12px; transition:border-color .15s; }
+[data-theme="light"] .nd-req-item{ border:1px solid var(--nd-line-2); background:var(--nd-card); }
+.nd-req-item:hover{ border-color:var(--nd-accent); }
+.nd-req-top{ display:flex; align-items:center; gap:9px; }
+.nd-req-pic{ width:26px; height:26px; border-radius:var(--nd-radius); flex:none; object-fit:cover; border:1px solid var(--nd-line); background:var(--nd-card2); }
+.nd-req-pic-ph{ background:radial-gradient(circle at 30% 30%, var(--nd-accent-soft), var(--nd-card2)); }
+.nd-req-who{ min-width:0; flex:1; }
+.nd-req-who b{ display:block; font-size:13px; color:var(--nd-txt); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.nd-req-meta{ display:block; font-size:10px; font-family:var(--nd-mono); color:var(--nd-mute); margin-top:1px; }
+.nd-req-tag{
+  font-family:var(--nd-mono); font-size:8.5px; letter-spacing:.1em; color:var(--nd-rest); flex:none; align-self:flex-start;
+  border:1px solid color-mix(in srgb, var(--nd-rest) 40%, transparent); border-radius:var(--nd-radius); padding:2px 6px;
+}
+.nd-req-tag-mention{ color:var(--nd-accent); border-color:color-mix(in srgb, var(--nd-accent) 40%, transparent); }
+.nd-req-snip{
+  font-size:12.5px; line-height:1.5; color:var(--nd-dim); margin:8px 0 0; word-break:break-word;
+  display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;
+}
+.nd-req-act{ margin-top:9px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.nd-req-btn, .nd-tc-btn, .nd-req-view{
+  font-family:var(--nd-mono); font-size:10.5px; letter-spacing:.04em; color:var(--nd-dim);
+  background:none; border:1px solid var(--nd-line-2); border-radius:var(--nd-radius); padding:5px 10px;
+  cursor:pointer; transition:.12s; line-height:1;
+}
+.nd-req-btn:hover, .nd-tc-btn:hover, .nd-req-view:hover{ color:var(--nd-txt); border-color:var(--nd-line-2); background:var(--nd-accent-soft); }
+.nd-req-btn:disabled, .nd-tc-btn:disabled{ opacity:.45; cursor:default; }
+/* Approve is the affirmative action */
+.nd-req-approve, .nd-tc-approve{ color:var(--nd-accent); border-color:color-mix(in srgb, var(--nd-accent) 40%, transparent); }
+.nd-req-approve:hover, .nd-tc-approve:hover{ color:var(--nd-on-accent); border-color:transparent; background:var(--nd-accent); }
+/* Block / revoke are destructive */
+.nd-req-block:hover, .nd-tc-block:hover, .nd-tc-revoke:hover{ color:#fff; border-color:var(--nd-down); background:color-mix(in srgb, var(--nd-down) 15%, transparent); }
+.nd-tc-mini{ padding:5px 8px; }
+
+/* control rows sit just under the reply they act on */
+.nd-tc{ display:flex; gap:6px; align-items:center; margin:-4px 0 12px; padding-left:12px; }
+.nd-tc-owner{ opacity:.55; transition:opacity .12s; }
+.nd-tc-owner:hover{ opacity:1; }
+
+/* the author-only "unendorsed replies" disclosure (design §6.4) */
+.nd-unend{
+  margin-bottom:12px; padding:10px 12px 4px; border:1px dashed color-mix(in srgb, var(--nd-accent) 35%, transparent);
+  border-radius:var(--nd-radius); background:color-mix(in srgb, var(--nd-accent) 5%, transparent);
+}
+.nd-unend-h{
+  font-size:10px; font-family:var(--nd-mono); letter-spacing:.12em; text-transform:uppercase; color:var(--nd-accent);
+  margin-bottom:10px;
+}
+.nd-unend-item{ margin-bottom:4px; }
+
+/* ===== "media resting" tombstone — mirror-fetch exhausted (design §7) ===== */
+.nd-tombstone{
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:9px;
+  text-align:center; padding:26px 20px; margin:6px 0; min-height:120px;
+  border:1px solid var(--nd-line); border-radius:var(--nd-radius);
+  background:var(--nd-card2);
+  -webkit-backdrop-filter:none; backdrop-filter:none;
+}
+[data-theme="light"] .nd-tombstone{ border:2px dashed var(--nd-line-2); background:var(--nd-ground); }
+.nd-tombstone-glyph{ font-size:26px; color:var(--nd-rest); opacity:.9; line-height:1; }
+.nd-tombstone-text{ font-size:13.5px; color:var(--nd-dim); line-height:1.5; }
+.nd-tombstone-sub{ display:block; font-size:11.5px; color:var(--nd-mute); margin-top:3px; }
+.nd-tombstone-retry{
+  margin-top:2px; padding:8px 14px; border-radius:var(--nd-radius); cursor:pointer;
+  font-family:var(--nd-mono); font-size:12px; font-weight:600;
+  color:var(--nd-rest); background:color-mix(in srgb, var(--nd-rest) 10%, transparent);
+  border:1px solid color-mix(in srgb, var(--nd-rest) 30%, transparent); transition:.15s;
+}
+.nd-tombstone-retry:hover:not(:disabled){ background:color-mix(in srgb, var(--nd-rest) 18%, transparent); }
+.nd-tombstone-retry:disabled{ color:var(--nd-mute); border-color:var(--nd-line); background:transparent; cursor:default; }
+.nd-tombstone-cid{ font-size:10px; font-family:var(--nd-mono); color:var(--nd-mute); letter-spacing:.03em; }
+.nd-recovered-media{ max-width:100%; border-radius:var(--nd-radius); display:block; }
+
+/* "Locating media…" — shown while mirror-fetch is resolving a swarm image */
+.nd-locating{
+  display:flex; align-items:center; justify-content:center; gap:10px;
+  min-height:84px; margin:6px 0; padding:18px;
+  border:1px dashed var(--nd-line); border-radius:var(--nd-radius); background:transparent;
+}
+.nd-locating-dot{ width:8px; height:8px; border-radius:50%; background:var(--nd-accent);
+  box-shadow:none; animation:nd-locating-pulse 1.2s ease-in-out infinite; }
+.nd-locating-text{ font-size:12px; font-family:var(--nd-mono); color:var(--nd-mute); letter-spacing:.02em; }
+@keyframes nd-locating-pulse{ 0%,100%{opacity:.25} 50%{opacity:1} }
+
+/* ===== "Follow this conversation" control + thread-follow chip ===== */
+.nd-tf-bar{
+  display:flex; align-items:center; gap:11px; flex-wrap:wrap;
+  margin:0 0 14px; padding:10px 12px;
+  border:1px solid var(--nd-line); border-radius:var(--nd-radius); background:var(--nd-card);
+}
+.nd-tf-btn{
+  display:inline-flex; align-items:center; gap:7px; cursor:pointer; transition:.14s; line-height:1;
+  border:1px solid var(--nd-line-2); border-radius:var(--nd-radius); padding:7px 12px;
+  background:transparent; color:var(--nd-dim);
+}
+.nd-tf-btn:hover{ color:var(--nd-txt); border-color:var(--nd-accent); background:var(--nd-accent-soft); }
+.nd-tf-ic{ font-size:13px; color:var(--nd-mute); }
+.nd-tf-btn:hover .nd-tf-ic{ color:var(--nd-accent); }
+.nd-tf-label{ font-size:10.5px; font-family:var(--nd-mono); letter-spacing:.1em; }
+.nd-tf-btn.nd-tf-on{
+  color:var(--nd-txt); border-color:color-mix(in srgb, var(--nd-accent) 50%, transparent);
+  background:var(--nd-accent-soft); box-shadow:none;
+}
+.nd-tf-btn.nd-tf-on .nd-tf-ic{ color:var(--nd-accent); filter:none; }
+.nd-tf-hint{ font-size:10px; font-family:var(--nd-mono); letter-spacing:.04em; color:var(--nd-mute); }
+.nd-tf-chip{
+  font-family:var(--nd-mono); font-size:10px; color:var(--nd-gilt);
+  border:1px solid var(--nd-line-2); border-radius:var(--nd-radius); padding:1px 6px; margin-left:8px;
+  letter-spacing:.06em; vertical-align:middle; cursor:pointer; white-space:nowrap; transition:.12s;
+}
+.nd-tf-chip:hover{ background:var(--nd-accent-soft); }
+[data-theme="light"] .nd-tf-chip{ color:var(--nd-accent); border:2px solid var(--nd-accent); border-radius:1px; font-weight:700; }
+
+/* ===== media viewer — click an image in a note to focus it ===== */
+.post-content img{ cursor:zoom-in; }
+.nd-media-viewer{
+  position:fixed; inset:0; z-index:10000;
+  display:flex; align-items:center; justify-content:center;
+  background:rgba(10,8,6,.85); cursor:zoom-out;
+}
+[data-theme="light"] .nd-media-viewer{ background:rgba(23,22,26,.6); }
+.nd-media-viewer img{
+  max-width:92vw; max-height:92vh; cursor:default;
+  border-radius:var(--nd-radius); box-shadow:0 8px 40px rgba(0,0,0,.5);
+}
+.nd-media-viewer-close{
+  position:absolute; top:18px; right:22px; width:34px; height:34px;
+  display:grid; place-items:center; cursor:pointer; font-size:15px;
+  background:none; border:1px solid rgba(236,227,210,.5); border-radius:var(--nd-radius);
+  color:#ECE3D2; /* overlay is dark in both themes */
+}
+.nd-media-viewer-close:hover{ border-color:#ECE3D2; }
+
+/* ---- Anonymous-mode media advisory in composers ----------------------------------------
+   Tor-posture nodes have no DHT and are onion-only, so gateway media URLs baked into
+   mirrored notes can never resolve for other clients until a clearnet visit. Amber =
+   advisory, per the status palette. */
+.nd-tor-media-note{display:none;margin:8px 0 0;padding:9px 12px;border:1px solid color-mix(in srgb, var(--nd-rest) 40%, transparent);border-radius:var(--nd-radius);background:color-mix(in srgb, var(--nd-rest) 9%, transparent);color:var(--nd-rest);font:500 11px/1.55 var(--nd-mono);letter-spacing:.03em}
+:root[data-nd-posture="tor"] .nd-tor-media-note{display:block}
+
+/* ============================ Settings: category sub-nav + panes ============================ */
+
+/* Sub-nav across the top of the settings scroller. Every pane stays mounted
+   at all times (saveSettings reads each field by id with no null guards) —
+   switching categories only flips the .on class on the pane wrappers. */
+.nd-set-nav{
+  position:sticky; top:0; z-index:5;
+  display:flex; flex-wrap:wrap; gap:6px;
+  margin:0 0 26px; padding:2px 0 10px;
+  background:var(--bg-primary);
+  border-bottom:var(--nd-rule);
+}
+.nd-set-tab{
+  font-family:var(--nd-mono); font-size:10.5px; font-weight:500;
+  letter-spacing:.14em; text-transform:uppercase; line-height:1;
+  color:var(--nd-dim); background:transparent; cursor:pointer;
+  border:none; border-left:2px solid transparent; border-radius:var(--nd-radius);
+  padding:8px 12px; transition:.15s; user-select:none;
+}
+.nd-set-tab:hover{ color:var(--nd-txt); }
+.nd-set-tab.on{
+  color:var(--nd-txt);
+  border-left-color:var(--nd-accent);
+  background:linear-gradient(90deg,var(--nd-accent-soft),transparent);
+}
+.nd-set-pane{ display:none; }
+.nd-set-pane.on{ display:block; }
+
+[data-theme="light"] .nd-set-tab{ border:2px solid transparent; color:var(--nd-txt); padding:6px 10px; }
+[data-theme="light"] .nd-set-tab:hover{ border-color:var(--nd-line); }
+[data-theme="light"] .nd-set-tab.on{
+  border-color:var(--nd-txt); background:var(--nd-card);
+  box-shadow:3px 3px 0 var(--nd-accent); font-weight:700;
+}
+
+/* ============================ Settings: retokenized controls ============================ */
+
+/* Shared text input — replaces the repeated inline
+   "background:#000/#111; border:#333; color:#fff" strings. Structural bits
+   (width/padding/margins) stay inline on each field. */
+.nd-set-input{
+  background:var(--bg-input);
+  border:1px solid var(--border-primary);
+  border-radius:var(--nd-radius);
+  color:var(--text-primary);
+}
+.nd-set-input:focus{ outline:none; border-color:var(--border-focus); }
+.nd-set-input::placeholder{ color:var(--text-muted); }
+
+/* Recessed list panel (muted users / hashtags / words scrollers) */
+.nd-set-well{
+  max-height:200px;
+  overflow-y:auto;
+  padding:8px;
+  background:var(--bg-input);
+  border:1px solid var(--border-primary);
+  border-radius:var(--nd-radius);
+}
+
+/* Filled accent action (Add relay / Mute / key export) — replaces the fake
+   linear-gradient(135deg, accent, accent) fills with color:#000 text. */
+.nd-set-btn-accent{
+  background:var(--nd-accent);
+  border:none;
+  border-radius:var(--nd-radius);
+  color:var(--nd-on-accent);
+  font-weight:700;
+  cursor:pointer;
+}
+.nd-set-btn-accent:hover{ background:var(--nd-accent-hi); }
+
+/* Quiet secondary action (Reset to Defaults / Import from Profile) */
+.nd-set-btn-quiet{
+  background:var(--bg-tertiary);
+  border:1px solid var(--border-primary);
+  border-radius:var(--nd-radius);
+  color:var(--text-primary);
+  cursor:pointer;
+}
+.nd-set-btn-quiet:hover{ border-color:var(--border-focus); }
+
+/* Amber caution panel (NIP-17 note, relay announce hint, key backup) —
+   was #1a1a00 / #FFDF00, which read as mud on paper. */
+.nd-set-warn{
+  padding:10px 12px;
+  background:color-mix(in srgb, var(--nd-rest) 10%, transparent);
+  border-left:3px solid var(--nd-rest);
+  border-radius:var(--nd-radius);
+}
+
+/* Footer (Cancel / Save) — was fully inline: black bar in light mode. */
+.settings-footer{
+  background:var(--bg-primary);
+  border-top:1px solid var(--border-primary);
+  padding:16px 20px;
+  flex-shrink:0;
+}
+
+[data-theme="light"] .nd-set-btn-accent{ box-shadow:3px 3px 0 var(--nd-accent-deep); }
+[data-theme="light"] .nd-set-btn-accent:hover{ background:var(--nd-accent); }
+[data-theme="light"] .nd-set-well{ border:1px solid var(--nd-line-2); }

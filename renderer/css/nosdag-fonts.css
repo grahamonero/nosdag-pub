@@ -1,0 +1,20 @@
+/* Nosdag bundled typefaces — Alegreya Sans (display + body) · JetBrains Mono (machine/data).
+   Served from the app bundle (font-src 'self'); no network fetch, per the local-crypto rule. */
+
+@font-face{ font-family:'Alegreya Sans'; font-style:normal; font-weight:400; font-display:swap;
+  src:url('/fonts/alegreya-sans-latin-400-normal.woff2') format('woff2'); }
+@font-face{ font-family:'Alegreya Sans'; font-style:italic; font-weight:400; font-display:swap;
+  src:url('/fonts/alegreya-sans-latin-400-italic.woff2') format('woff2'); }
+@font-face{ font-family:'Alegreya Sans'; font-style:normal; font-weight:500; font-display:swap;
+  src:url('/fonts/alegreya-sans-latin-500-normal.woff2') format('woff2'); }
+@font-face{ font-family:'Alegreya Sans'; font-style:normal; font-weight:700; font-display:swap;
+  src:url('/fonts/alegreya-sans-latin-700-normal.woff2') format('woff2'); }
+@font-face{ font-family:'Alegreya Sans'; font-style:normal; font-weight:800; font-display:swap;
+  src:url('/fonts/alegreya-sans-latin-800-normal.woff2') format('woff2'); }
+
+@font-face{ font-family:'JetBrains Mono'; font-style:normal; font-weight:400; font-display:swap;
+  src:url('/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
+@font-face{ font-family:'JetBrains Mono'; font-style:normal; font-weight:500; font-display:swap;
+  src:url('/fonts/jetbrains-mono-latin-500-normal.woff2') format('woff2'); }
+@font-face{ font-family:'JetBrains Mono'; font-style:normal; font-weight:700; font-display:swap;
+  src:url('/fonts/jetbrains-mono-latin-700-normal.woff2') format('woff2'); }

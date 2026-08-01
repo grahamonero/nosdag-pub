@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- H10: this page renders no remote content and makes zero network requests, so it can take a
+     hard CSP — inline script/style only, nothing fetched, navigation/embedding locked down. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<title>Nosdag</title>
+<!-- Boot-time posture chooser. DELIBERATELY self-contained: no scripts, stylesheets, fonts or
+     images are fetched — this page makes ZERO network requests, so a user who needs Tor never
+     leaks a clearnet packet before choosing. Main applies the Tor proxy BEFORE the app loads. -->
+<style>
+  :root{
+    --bg:#0a0e14; --glass:rgba(18,25,34,.55); --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.15);
+    --text:#e9eef5; --dim:#9aa4b4; --mute:#5d6878; --orange:#FF6600;
+    --mono:'SF Mono','Cascadia Code',ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    display:flex;align-items:center;justify-content:center;overflow:hidden;
+  }
+  body::before{ /* operator grid */
+    content:'';position:fixed;inset:0;pointer-events:none;opacity:.5;
+    background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);
+    background-size:34px 34px;
+    -webkit-mask-image:radial-gradient(900px 600px at 60% 0%,#000 30%,transparent 75%);
+  }
+  body::after{ /* top orange glow */
+    content:'';position:fixed;inset:0;pointer-events:none;
+    background:radial-gradient(1200px 560px at 60% -180px,rgba(255,102,0,.10),transparent);
+  }
+  .wrap{width:min(720px,92vw);position:relative;animation:rise .5s ease both}
+  @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  .brand{display:flex;align-items:baseline;gap:2px;font-weight:800;font-size:22px;letter-spacing:.01em}
+  .brand b{color:var(--orange)}
+  .k{margin-top:26px;font:600 10px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+  h1{margin-top:8px;font-size:26px;font-weight:750;letter-spacing:-.01em}
+  .cards{margin-top:24px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:620px){.cards{grid-template-columns:1fr}.proxy{grid-column:auto}}
+  .proxy{grid-column:2;text-align:left}
+  .proxy-toggle{background:none;border:none;color:var(--mute);cursor:pointer;font:600 10.5px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;padding:2px 0}
+  .proxy-toggle:hover{color:var(--dim)}
+  .proxy-body{margin-top:8px}
+  .proxy-body input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line2);background:rgba(255,255,255,.03);color:var(--text);font:600 12px/1.2 var(--mono)}
+  .proxy-body input::placeholder{color:var(--mute);font-weight:400}
+  .proxy-body input:focus{outline:none;border-color:rgba(255,102,0,.55)}
+  .proxy-note{margin-top:6px;font-size:11.5px;color:var(--mute)}
+  .card{
+    position:relative;text-align:left;cursor:pointer;border-radius:16px;padding:22px 20px 20px;
+    border:1px solid var(--line);color:var(--text);
+    background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,0)) ,var(--glass);
+    box-shadow:0 10px 34px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.05);
+    backdrop-filter:blur(14px);transition:.16s;
+  }
+  .card:hover,.card:focus-visible{border-color:rgba(255,102,0,.55);outline:none;transform:translateY(-2px)}
+  .card:disabled{opacity:.55;cursor:progress;transform:none}
+  .card .ico{font-size:22px}
+  .card h2{margin-top:10px;font-size:17px;font-weight:700;display:flex;align-items:center;gap:9px}
+  .card p{margin-top:8px;font-size:13px;line-height:1.55;color:var(--dim)}
+  .card .sub{margin-top:10px;font:600 10.5px/1.5 var(--mono);letter-spacing:.04em;color:var(--mute)}
+  .tag{font:600 9px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--orange);border:1px solid rgba(255,102,0,.45);border-radius:999px;padding:4px 8px}
+  .foot{margin-top:18px;font-size:12px;color:var(--mute)}
+  .status{margin-top:16px;font:600 12px/1.6 var(--mono);color:#f5a623;min-height:20px;display:flex;align-items:center;gap:9px}
+  .status .orb{width:9px;height:9px;border-radius:50%;background:#f5a623;box-shadow:0 0 10px #f5a623;animation:pulse 1.2s ease infinite;display:none}
+  .status.on .orb{display:block}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand">Nos<b>dag</b></div>
+    <div class="k">Network posture</div>
+    <h1>How should Nosdag connect?</h1>
+    <div class="cards">
+      <button class="card" id="clearnet">
+        <span class="ico">⚡</span>
+        <h2>Clearnet <span class="tag" id="tag-clearnet" hidden>last used</span></h2>
+        <p>Direct connections. Fast boot, full speed.</p>
+        <span class="sub">relays + peers see your IP</span>
+      </button>
+      <button class="card" id="tor">
+        <span class="ico">🧅</span>
+        <h2>Anonymous · Tor <span class="tag" id="tag-tor" hidden>last used</span></h2>
+        <p>Everything rides Tor — relays, peers, media. Nothing sees your IP.</p>
+        <span class="sub">slower start (~1 min)</span>
+      </button>
+      <div class="proxy">
+        <button class="proxy-toggle" id="proxy-toggle" type="button">▸ Use my own Tor proxy</button>
+        <div class="proxy-body" id="proxy-body" hidden>
+          <input id="proxy-in" type="text" spellcheck="false" autocomplete="off" placeholder="host:port — e.g. 192.168.1.1:9050">
+          <p class="proxy-note">Outbound only — your notes can’t be served over Tor this way.</p>
+        </div>
+      </div>
+    </div>
+    <div class="status" id="status"><span class="orb"></span><span id="status-t"></span></div>
+    <p class="foot">You still post as your npub either way. Switch anytime in the app under <b>Anonymous Mode</b>.</p>
+  </div>
+<script>
+  (function () {
+    var api = window.nosdag && window.nosdag.mode
+    // External Tor proxy expander: collapsed by default. proxyTouched gates whether choose()
+    // sends a torProxy opt at all — we only speak up when the user opened the expander or a
+    // saved proxy already existed (so emptying the field clears it, but an untouched, unopened
+    // expander never clobbers anything).
+    var proxyTouched = false
+    var proxyToggle = document.getElementById('proxy-toggle')
+    var proxyBody = document.getElementById('proxy-body')
+    function openProxy () {
+      proxyTouched = true
+      proxyBody.hidden = false
+      proxyToggle.textContent = '▾ Use my own Tor proxy'
+    }
+    proxyToggle.addEventListener('click', function () {
+      if (proxyBody.hidden) { openProxy() } else {
+        proxyBody.hidden = true
+        proxyToggle.textContent = '▸ Use my own Tor proxy'
+      }
+    })
+    // mark the last-used posture (main boots holding the persisted mode until we choose)
+    if (api && api.get) {
+      api.get().then(function (m) {
+        var t = document.getElementById('tag-' + (m && m.mode === 'tor' ? 'tor' : 'clearnet'))
+        if (t) t.hidden = false
+        // a saved proxy is in play — show it so the user knows what Tor would use
+        if (m && m.torProxy) {
+          document.getElementById('proxy-in').value = m.torProxy
+          openProxy()
+        }
+      }).catch(function () {})
+    }
+    function choose (target) {
+      var btns = document.querySelectorAll('.card')
+      btns.forEach(function (b) { b.disabled = true })
+      var st = document.getElementById('status')
+      st.classList.add('on')
+      var opts
+      if (target === 'tor' && proxyTouched) {
+        var v = document.getElementById('proxy-in').value.trim()
+        opts = { torProxy: v || null } // empty field = built-in Tor (clears any saved proxy)
+      }
+      document.getElementById('status-t').textContent = target === 'tor'
+        ? (opts && opts.torProxy ? 'Connecting through your Tor proxy…' : 'Starting Tor — circuits take a moment…')
+        : 'Starting…'
+      if (!api || !api.choose) { document.getElementById('status-t').textContent = 'shell bridge unavailable'; return }
+      api.choose(target, opts).then(function (r) {
+        if (r && r.error) {
+          document.getElementById('status-t').textContent = r.error
+          btns.forEach(function (b) { b.disabled = false })
+          st.classList.remove('on')
+        } // success → main navigates this window to the app
+      })
+    }
+    document.getElementById('clearnet').addEventListener('click', function () { choose('clearnet') })
+    document.getElementById('tor').addEventListener('click', function () { choose('tor') })
+  })()
+</script>
+</body>
+</html>

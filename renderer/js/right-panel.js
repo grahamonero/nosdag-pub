@@ -1,0 +1,3246 @@
+/**
+ * Right Panel Module
+ * Manages the three-column layout's right panel for contextual content
+ * (threads, profiles, settings, wallet, compose, zap flow)
+ */
+
+// Debug flag for console logging
+const DEBUG = false;
+
+// Timeout constants (in milliseconds)
+const TIMEOUTS = Object.freeze({
+    RELAY_INIT_DELAY: 500,
+    TRUST_BADGE_DELAY: 100,
+    RELAY_PING: 5000,
+    FEED_REFRESH_DELAY: 1000
+});
+
+// Limit constants
+const LIMITS = Object.freeze({
+    HISTORY_MAX: 20,
+    POPULAR_POSTS: 15,
+    PROFILE_POSTS: 10,
+    THREAD_REPLIES: 100,
+    NESTED_REPLIES: 100,
+    THREAD_BATCH_SIZE: 20,
+    ENGAGEMENT_LIMIT: 500,
+    REPOSTS_LIMIT: 200,
+    FOLLOWERS_LIMIT: 200,
+    TIPS_LIMIT: 100
+});
+
+// Fallback relays for better coverage when user relays fail
+// NOTE: relay.nostr.band removed Dec 28, 2025 - SSL cert expired Dec 22
+const FALLBACK_RELAYS = Object.freeze([
+    'wss://relay.damus.io',
+    'wss://nos.lol',
+    'wss://relay.snort.social'
+]);
+
+// Panel state
+const RightPanel = {
+    currentView: 'default', // 'default', 'thread', 'profile', 'settings', 'wallet', 'compose', 'reply', 'zap'
+    currentData: null,      // Data for current view (e.g., noteId, pubkey)
+    isResizing: false,
+    startX: 0,
+    startWidth: 0,
+    minWidth: 320,
+    maxWidth: 800,
+
+    // Navigation history for back button
+    history: [], // Array of {view, data, title} objects
+
+    // Track the default feed title (set when content is loaded)
+    defaultFeedTitle: 'Popular Notes',
+
+    // Guard against race conditions in async content loading
+    loadContentId: 0,
+
+    // Profile posts pagination state
+    profilePostsLoaded: [],
+    profilePubkey: null,
+    profileOldestTimestamp: null,
+
+    // DOM elements (cached on init)
+    panel: null,
+    header: null,
+    title: null,
+    closeBtn: null,
+    backBtn: null,
+    content: null,
+    defaultFeed: null,
+    resizeHandle: null,
+
+    /**
+     * Initialize the right panel
+     */
+    init() {
+        // Cache DOM elements
+        this.panel = document.getElementById('rightPanel');
+        this.header = this.panel?.querySelector('.right-panel-header');
+        this.title = document.getElementById('rightPanelTitle');
+        this.closeBtn = document.getElementById('rightPanelClose');
+        this.content = document.getElementById('rightPanelContent');
+        this.defaultFeed = document.getElementById('rightPanelDefaultFeed');
+        this.resizeHandle = document.getElementById('rightPanelResizeHandle');
+
+        if (!this.panel) {
+            console.warn('Right panel not found in DOM');
+            return;
+        }
+
+        // Verify content element exists
+        if (!this.content) {
+            console.error('Right panel content element not found!');
+            return;
+        }
+
+        // Create back button if it doesn't exist
+        this.setupBackButton();
+
+        // Setup resize functionality
+        this.setupResize();
+
+        // Setup URL routing
+        this.setupRouting();
+
+        // Load default content based on login state
+        this.loadDefaultContent();
+
+        // Listen for login state changes
+        window.addEventListener('nosmero:login', () => this.loadDefaultContent());
+        window.addEventListener('nosmero:logout', () => this.loadDefaultContent());
+
+        // Listen for wallet state changes to update dashboard wallet section
+        window.addEventListener('nosmero:wallet-changed', () => this.refreshWalletSection());
+
+        // Listen for address rotation to update profile Monero address display
+        window.addEventListener('nosmero:address-rotated', (e) => {
+            const container = document.getElementById('panelProfileMoneroAddress');
+            if (container && window.NostrState?.publicKey) {
+                // Refresh the Monero address display for current user's profile
+                this.loadPanelMoneroAddress(window.NostrState.publicKey);
+            }
+        });
+
+        if (DEBUG) console.log('Right panel initialized');
+    },
+
+    /**
+     * Setup back button in header
+     */
+    setupBackButton() {
+        // Check if back button already exists
+        this.backBtn = document.getElementById('rightPanelBack');
+        if (!this.backBtn && this.header) {
+            // Create back button
+            this.backBtn = document.createElement('button');
+            this.backBtn.id = 'rightPanelBack';
+            this.backBtn.className = 'right-panel-back';
+            this.backBtn.innerHTML = '←';
+            this.backBtn.style.cssText = 'display: none; background: none; border: none; color: var(--text-secondary); font-size: 18px; cursor: pointer; padding: 4px 8px; border-radius: 4px; margin-right: 8px; min-width: 32px; min-height: 32px;';
+            this.backBtn.onclick = () => this.goBack();
+
+            // Insert at beginning of header
+            this.header.insertBefore(this.backBtn, this.header.firstChild);
+        }
+    },
+
+    /**
+     * Go back to previous view in history
+     */
+    goBack() {
+        if (this.history.length === 0) {
+            this.close();
+            return;
+        }
+
+        const previous = this.history.pop();
+
+        // Don't push to history when going back
+        this.openView(previous.view, previous.data, false);
+
+        // Update back button visibility
+        this.updateBackButton();
+    },
+
+    /**
+     * Update back button visibility - show when in contextual mode (not default)
+     */
+    updateBackButton() {
+        if (this.backBtn) {
+            // Show back button whenever we're not on default view
+            this.backBtn.style.display = this.currentView !== 'default' ? 'block' : 'none';
+        }
+    },
+
+    /**
+     * Push current view to history before navigating
+     */
+    pushToHistory() {
+        if (this.currentView && this.currentView !== 'default') {
+            this.history.push({
+                view: this.currentView,
+                data: this.currentData,
+                title: this.title?.textContent || ''
+            });
+            // Limit history size
+            if (this.history.length > LIMITS.HISTORY_MAX) {
+                this.history.shift();
+            }
+        }
+    },
+
+    /**
+     * Check if right panel is visible (desktop only)
+     */
+    isVisible() {
+        if (!this.panel) return false;
+        const style = window.getComputedStyle(this.panel);
+        return style.display !== 'none';
+    },
+
+    /**
+     * Setup panel resize functionality
+     */
+    setupResize() {
+        if (!this.resizeHandle) return;
+
+        this.resizeHandle.addEventListener('mousedown', (e) => {
+            this.isResizing = true;
+            this.startX = e.clientX;
+            this.startWidth = this.panel.offsetWidth;
+            this.resizeHandle.classList.add('dragging');
+            document.body.style.cursor = 'ew-resize';
+            document.body.style.userSelect = 'none';
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!this.isResizing) return;
+
+            // Calculate new width (dragging left = wider, right = narrower)
+            const diff = this.startX - e.clientX;
+            let newWidth = this.startWidth + diff;
+
+            // Clamp to min/max
+            newWidth = Math.max(this.minWidth, Math.min(this.maxWidth, newWidth));
+
+            this.panel.style.width = `${newWidth}px`;
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (this.isResizing) {
+                this.isResizing = false;
+                this.resizeHandle.classList.remove('dragging');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+
+                // Save width preference
+                localStorage.setItem('rightPanelWidth', this.panel.offsetWidth);
+            }
+        });
+
+        // Restore saved width
+        const savedWidth = localStorage.getItem('rightPanelWidth');
+        if (savedWidth) {
+            const width = parseInt(savedWidth, 10);
+            if (width >= this.minWidth && width <= this.maxWidth) {
+                this.panel.style.width = `${width}px`;
+            }
+        }
+    },
+
+    /**
+     * Setup URL routing for panel state
+     */
+    setupRouting() {
+        // Handle browser back/forward
+        window.addEventListener('popstate', (e) => {
+            if (e.state?.rightPanel) {
+                this.openView(e.state.rightPanel.view, e.state.rightPanel.data, false);
+            } else {
+                this.close(false);
+            }
+        });
+
+        // Check initial URL for panel state
+        const params = new URLSearchParams(window.location.search);
+        const thread = params.get('thread');
+        const profile = params.get('profile');
+        const article = params.get('article');
+        const panel = params.get('panel');
+
+        if (thread) {
+            this.openThread(thread, false);
+        } else if (profile) {
+            this.openProfile(profile, false);
+        } else if (article) {
+            // Decode the naddr → {pubkey, identifier, relayHints} and open the
+            // article reader. Article data isn't a simple ID so it round-trips
+            // as a naddr1 in the URL.
+            try {
+                const { nip19 } = window.NostrTools;
+                const decoded = nip19.decode(article);
+                if (decoded.type === 'naddr' && decoded.data.kind === 30023) {
+                    this.openArticle({
+                        pubkey: decoded.data.pubkey,
+                        identifier: decoded.data.identifier || '',
+                        relayHints: decoded.data.relays || [],
+                    }, false);
+                }
+            } catch (e) {
+                console.warn('Could not decode ?article naddr on init:', e?.message || e);
+            }
+        } else if (panel) {
+            this.openView(panel, null, false);
+        }
+    },
+
+    /**
+     * Update URL to reflect panel state
+     */
+    updateURL(view, data, pushState = true) {
+        const url = new URL(window.location);
+
+        // Clear previous panel params
+        url.searchParams.delete('thread');
+        url.searchParams.delete('profile');
+        url.searchParams.delete('article');
+        url.searchParams.delete('panel');
+
+        // Set new param based on view
+        if (view === 'thread' && data) {
+            url.searchParams.set('thread', data);
+        } else if (view === 'profile' && data) {
+            url.searchParams.set('profile', data);
+        } else if (view === 'article' && data) {
+            // Serialize article coord as the naddr1 — that round-trips cleanly
+            // when the user shares the URL.
+            let naddr = null;
+            try {
+                if (data && data.kind === 30023) {
+                    const { nip19 } = window.NostrTools;
+                    naddr = nip19.naddrEncode({
+                        kind: 30023,
+                        pubkey: data.pubkey,
+                        identifier: (data.tags || []).find(t => t[0] === 'd')?.[1] || '',
+                    });
+                } else if (data && data.pubkey && data.identifier !== undefined) {
+                    const { nip19 } = window.NostrTools;
+                    naddr = nip19.naddrEncode({
+                        kind: 30023,
+                        pubkey: data.pubkey,
+                        identifier: data.identifier,
+                        relays: data.relayHints || [],
+                    });
+                }
+            } catch (e) {
+                console.warn('updateURL: naddr encode failed', e);
+            }
+            if (naddr) url.searchParams.set('article', naddr);
+            else url.searchParams.set('panel', 'article');
+        } else if (view !== 'default') {
+            url.searchParams.set('panel', view);
+        }
+
+        const state = { rightPanel: { view, data } };
+
+        if (pushState) {
+            history.pushState(state, '', url);
+        } else {
+            history.replaceState(state, '', url);
+        }
+    },
+
+    /**
+     * Load default content based on login state
+     */
+    async loadDefaultContent() {
+        if (!this.defaultFeed) return;
+
+        ++this.loadContentId; // invalidate any in-flight feed loads
+
+        // Nosdag: the panel's idle/default content is the live telemetry deck (Your Node +
+        // Hosting you), not the popular-notes feed. Contextual views (thread/profile/compose)
+        // still take over the panel and revert here on close().
+        this.defaultFeedTitle = 'IPFS';
+        if (this.title) this.title.textContent = this.defaultFeedTitle;
+
+        try {
+            const Deck = await import('./nosdag/telemetry-deck.js');
+            await Deck.renderTelemetryDeck(this.defaultFeed);
+        } catch (error) {
+            console.error('[Nosdag] telemetry deck failed:', error);
+            this.defaultFeed.innerHTML = '<div class="error" style="padding: 20px; color: var(--text-secondary);">Node telemetry unavailable</div>';
+        }
+    },
+
+    /**
+     * Load Trending Monero feed into default panel
+     */
+    async loadTrendingMoneroFeed() {
+        if (!window.loadTrendingMoneroFeed || !this.defaultFeed) return;
+
+        // Capture current load ID to detect if superseded
+        const loadId = this.loadContentId;
+
+        const { posts, engagementData } = await this.fetchTrendingMoneroPosts();
+        this.renderPostsToPanel(posts, 'Trending Monero Notes', loadId, engagementData);
+    },
+
+    /**
+     * Load Popular Notes feed into default panel
+     */
+    async loadPopularNotesFeed() {
+        if (!this.defaultFeed) return;
+
+        // Capture current load ID to detect if superseded
+        const loadId = this.loadContentId;
+
+        const { posts, engagementData } = await this.fetchPopularPosts();
+        this.renderPostsToPanel(posts, 'Popular Notes', loadId, engagementData);
+    },
+
+    /**
+     * Fetch trending Monero posts (uses existing logic)
+     * @returns {{ posts: Array, engagementData: Object }}
+     */
+    async fetchTrendingMoneroPosts() {
+        // Use the existing relay pool and fetch logic
+        const pool = window.NostrState?.pool;
+        const relays = window.NostrRelays?.getReadRelays?.() || window.NostrRelays?.getActiveRelays?.();
+
+        if (!pool || !relays?.length) {
+            console.warn('Right panel: No pool or relays available for Monero feed');
+            return { posts: [], engagementData: {} };
+        }
+
+        const moneroTerms = ['monero', 'xmr', '#monero', '#xmr'];
+        const since = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60; // Last 7 days
+
+        try {
+            const events = await pool.querySync(relays, {
+                kinds: [1],
+                limit: 50,
+                since
+            });
+
+            // Filter for Monero-related content
+            const moneroEvents = events.filter(event => {
+                const content = event.content.toLowerCase();
+                return moneroTerms.some(term => content.includes(term));
+            });
+
+            // Fetch engagement data for Monero posts
+            let engagementData = {};
+            if (moneroEvents.length > 0 && window.NostrPosts?.fetchEngagementCounts) {
+                engagementData = await window.NostrPosts.fetchEngagementCounts(moneroEvents.map(n => n.id));
+            }
+
+            // Sort by total engagement (same as popular posts)
+            moneroEvents.sort((a, b) => {
+                const engageA = (engagementData[a.id]?.replies || 0) +
+                               (engagementData[a.id]?.reactions || 0) +
+                               (engagementData[a.id]?.zaps || 0);
+                const engageB = (engagementData[b.id]?.replies || 0) +
+                               (engagementData[b.id]?.reactions || 0) +
+                               (engagementData[b.id]?.zaps || 0);
+                // If equal engagement, sort by recency
+                if (engageB === engageA) {
+                    return b.created_at - a.created_at;
+                }
+                return engageB - engageA;
+            });
+
+            return { posts: moneroEvents.slice(0, 20), engagementData };
+        } catch (error) {
+            console.error('Error fetching trending Monero posts:', error);
+            return { posts: [], engagementData: {} };
+        }
+    },
+
+    /**
+     * Fetch popular posts - same logic as "Popular Notes" tab (loadTrendingAllFeed)
+     * Fetches recent notes and sorts by engagement (replies + reactions + zaps)
+     * @returns {{ posts: Array, engagementData: Object }}
+     */
+    async fetchPopularPosts() {
+        const pool = window.NostrState?.pool;
+        const relays = window.NostrRelays?.DEFAULT_RELAYS || window.NostrRelays?.getReadRelays?.();
+
+        if (!pool || !relays?.length) {
+            console.warn('Right panel: No pool or relays available for popular feed');
+            return { posts: [], engagementData: {} };
+        }
+
+        try {
+            if (DEBUG) console.log('Right panel: Loading popular notes (last 24h, sorted by engagement)...');
+
+            // Query for recent notes from last 24 hours (same as loadTrendingAllFeed)
+            const oneDayAgo = Math.floor(Date.now() / 1000) - (24 * 60 * 60);
+
+            const notes = await pool.querySync(relays, {
+                kinds: [1],
+                since: oneDayAgo,
+                limit: 200  // Same as loadTrendingAllFeed
+            });
+
+            if (DEBUG) console.log(`Right panel: Found ${notes.length} recent notes`);
+
+            if (!notes || notes.length === 0) {
+                return { posts: [], engagementData: {} };
+            }
+
+            // Fetch engagement data (replies, reactions, zaps)
+            let engagementData = {};
+            if (window.NostrPosts?.fetchEngagementCounts) {
+                engagementData = await window.NostrPosts.fetchEngagementCounts(notes.map(n => n.id));
+            }
+
+            // Sort by total engagement (same logic as loadTrendingAllFeed)
+            notes.sort((a, b) => {
+                const engageA = (engagementData[a.id]?.replies || 0) +
+                               (engagementData[a.id]?.reactions || 0) +
+                               (engagementData[a.id]?.zaps || 0);
+                const engageB = (engagementData[b.id]?.replies || 0) +
+                               (engagementData[b.id]?.reactions || 0) +
+                               (engagementData[b.id]?.zaps || 0);
+                return engageB - engageA;
+            });
+
+            // Return top most engaged notes with engagement data
+            return { posts: notes.slice(0, LIMITS.POPULAR_POSTS), engagementData };
+        } catch (error) {
+            console.error('Error fetching popular posts:', error);
+            return { posts: [], engagementData: {} };
+        }
+    },
+
+    /**
+     * Render posts to the panel's default feed
+     * @param {Array} posts - Posts to render
+     * @param {string} title - Feed title
+     * @param {number} loadId - Optional load ID to check for stale operations
+     * @param {Object} engagementData - Pre-fetched engagement data for posts
+     */
+    async renderPostsToPanel(posts, title, loadId = null, engagementData = null) {
+        if (!this.defaultFeed) return;
+
+        // Check if this render is stale (another load has started)
+        if (loadId !== null && loadId !== this.loadContentId) {
+            if (DEBUG) console.log('Right panel: Skipping stale render for', title);
+            return;
+        }
+
+        if (!posts || posts.length === 0) {
+            this.defaultFeed.innerHTML = `
+                <div style="padding: 20px; text-align: center; color: var(--text-secondary);">
+                    No notes found
+                </div>
+            `;
+            return;
+        }
+
+        // Fetch profiles for these posts first
+        const uniquePubkeys = [...new Set(posts.map(p => p.pubkey))];
+        const pubkeysToFetch = uniquePubkeys.filter(pk => !window.NostrState?.profileCache?.[pk]);
+        if (pubkeysToFetch.length > 0 && window.NostrPosts?.fetchProfiles) {
+            await window.NostrPosts.fetchProfiles(pubkeysToFetch);
+        }
+
+        // Fetch disclosed tips for these posts (for verified tip badges)
+        if (window.NostrPosts?.fetchDisclosedTips) {
+            try {
+                const disclosedTipsData = await window.NostrPosts.fetchDisclosedTips(posts);
+                // Cache the tips data for renderSinglePost to access
+                if (window.NostrPosts?.disclosedTipsCache) {
+                    Object.assign(window.NostrPosts.disclosedTipsCache, disclosedTipsData);
+                }
+            } catch (tipError) {
+                console.error('Right panel: Error fetching disclosed tips:', tipError);
+            }
+        }
+
+        // Check again after async fetches
+        if (loadId !== null && loadId !== this.loadContentId) {
+            if (DEBUG) console.log('Right panel: Skipping stale render for', title);
+            return;
+        }
+
+        // Use existing renderSinglePost function if available
+        if (window.NostrPosts?.renderSinglePost) {
+            try {
+                const renderedPosts = await Promise.all(
+                    posts.map(post => window.NostrPosts.renderSinglePost(post, 'feed', engagementData, null))
+                );
+
+                // Final check before DOM update
+                if (loadId !== null && loadId !== this.loadContentId) {
+                    if (DEBUG) console.log('Right panel: Skipping stale render for', title);
+                    return;
+                }
+
+                this.defaultFeed.innerHTML = renderedPosts.join('');
+
+                // Reveal paywalled notes this user has already unlocked (the right
+                // panel otherwise skips paywall processing, leaving them locked).
+                try {
+                    const PaywallUI = await import('./paywall-ui.js');
+                    await PaywallUI.processPaywalledNotes(this.defaultFeed);
+                } catch (paywallError) {
+                    console.error('Right panel: Error processing paywalled notes:', paywallError);
+                }
+
+                // Process embedded notes (quote reposts)
+                try {
+                    const Utils = await import('./utils.js');
+                    await Utils.processEmbeddedNotes('rightPanelDefaultFeed');
+                } catch (embedError) {
+                    console.error('Right panel: Error processing embedded notes:', embedError);
+                }
+
+                // Add trust badges after rendering (same as main feed)
+                try {
+                    if (window.NostrTrustBadges?.addFeedTrustBadges) {
+                        await window.NostrTrustBadges.addFeedTrustBadges(
+                            posts.map(p => ({ id: p.id, pubkey: p.pubkey })),
+                            '#rightPanelDefaultFeed'
+                        );
+                    }
+                } catch (badgeError) {
+                    console.error('Right panel: Error adding trust badges:', badgeError);
+                }
+            } catch (error) {
+                console.error('Error rendering posts with NostrPosts:', error);
+                // Fallback to basic rendering
+                if (loadId === null || loadId === this.loadContentId) {
+                    this.renderPostsBasic(posts);
+                }
+            }
+        } else {
+            // Fallback: basic rendering
+            this.renderPostsBasic(posts);
+        }
+    },
+
+    /**
+     * Basic post rendering fallback
+     */
+    renderPostsBasic(posts) {
+        this.defaultFeed.innerHTML = posts.map(post => `
+            <div class="post" data-id="${post.id}" onclick="openThreadView('${post.id}')" style="cursor: pointer;">
+                <div class="post-content" style="padding: 12px;">
+                    ${this.escapeHtml(post.content.substring(0, 200))}${post.content.length > 200 ? '...' : ''}
+                </div>
+            </div>
+        `).join('');
+    },
+
+    // ==================== DASHBOARD ====================
+
+    /**
+     * Load the user dashboard with Wallet, Relays, and Engagement sections
+     */
+    async loadDashboard() {
+        if (!this.defaultFeed) return;
+
+        // Render initial structure with loading states
+        this.defaultFeed.innerHTML = `
+            <div class="dashboard">
+                <div class="dashboard-section" id="dashboardWallet">
+                    <div class="dashboard-section-header">
+                        <span class="dashboard-icon">💰</span>
+                        <span class="dashboard-section-title">Tip Jar</span>
+                    </div>
+                    <div class="dashboard-section-content">
+                        <div class="loading-small">Loading...</div>
+                    </div>
+                </div>
+                <div class="dashboard-section" id="dashboardRelays">
+                    <div class="dashboard-section-header">
+                        <span class="dashboard-icon">📡</span>
+                        <span class="dashboard-section-title">Relays</span>
+                    </div>
+                    <div class="dashboard-section-content">
+                        <div class="loading-small">Loading...</div>
+                    </div>
+                </div>
+                <div class="dashboard-section" id="dashboardEngagement">
+                    <div class="dashboard-section-header">
+                        <span class="dashboard-icon">📊</span>
+                        <span class="dashboard-section-title">Engagement (7 days)</span>
+                    </div>
+                    <div class="dashboard-section-content">
+                        <div class="loading-small">Loading...</div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Load each section in parallel
+        await Promise.all([
+            this.loadWalletSection(),
+            this.loadRelaySection(),
+            this.loadEngagementSection()
+        ]);
+    },
+
+    /**
+     * Load wallet section content
+     */
+    async loadWalletSection() {
+        const container = document.querySelector('#dashboardWallet .dashboard-section-content');
+        if (!container) return;
+
+        try {
+            // Dynamically import wallet module
+            let walletModule;
+            try {
+                walletModule = await import('./wallet/index.js');
+            } catch (e) {
+                console.warn('Could not load wallet module:', e);
+                container.innerHTML = `
+                    <div class="dashboard-row">
+                        <span class="dashboard-label">Status</span>
+                        <span class="dashboard-value muted">Not available</span>
+                    </div>
+                `;
+                return;
+            }
+
+            const hasWallet = await walletModule.hasWallet?.();
+
+            if (!hasWallet) {
+                container.innerHTML = `
+                    <div class="dashboard-row">
+                        <span class="dashboard-label">Status</span>
+                        <span class="dashboard-value muted">No Tip Jar created</span>
+                    </div>
+                    <button class="dashboard-action-btn" onclick="openWalletModal()">Create Tip Jar</button>
+                `;
+                return;
+            }
+
+            const isUnlocked = walletModule.isWalletUnlocked?.();
+
+            if (!isUnlocked) {
+                container.innerHTML = `
+                    <div class="dashboard-row">
+                        <span class="dashboard-label">Status</span>
+                        <span class="dashboard-value">🔒 Locked</span>
+                    </div>
+                    <button class="dashboard-action-btn" onclick="openWalletModal()">Unlock Tip Jar</button>
+                `;
+                return;
+            }
+
+            // Wallet is unlocked - get balance
+            let balanceHtml = '<span class="dashboard-value muted">--</span>';
+            try {
+                const balanceData = await walletModule.getBalance?.();
+                if (balanceData !== undefined) {
+                    const bal = balanceData.balance ?? balanceData ?? 0n;
+                    const formatted = walletModule.formatXMR?.(bal) || (Number(bal) / 1e12).toFixed(4);
+                    balanceHtml = `<span class="dashboard-value">${formatted} XMR</span>`;
+                }
+            } catch (e) {
+                console.error('Error getting balance:', e);
+            }
+
+            // Get tips received (query kind 9736 events where user is tagged)
+            const tipsReceived = await this.fetchTipsReceived();
+
+            container.innerHTML = `
+                <div class="dashboard-row">
+                    <span class="dashboard-label">Balance</span>
+                    ${balanceHtml}
+                </div>
+                <div class="dashboard-row">
+                    <span class="dashboard-label">Status</span>
+                    <span class="dashboard-value success">🔓 Unlocked</span>
+                </div>
+                <div class="dashboard-row">
+                    <span class="dashboard-label">Tips received</span>
+                    <span class="dashboard-value">${tipsReceived.count} ${tipsReceived.total ? `(${tipsReceived.total})` : ''}</span>
+                </div>
+                <button class="dashboard-action-btn" onclick="openWalletModal()">Open Tip Jar</button>
+            `;
+        } catch (error) {
+            console.error('Error loading wallet section:', error);
+            container.innerHTML = `
+                <div class="dashboard-row">
+                    <span class="dashboard-value muted">Error loading Tip Jar</span>
+                </div>
+            `;
+        }
+    },
+
+    /**
+     * Refresh just the wallet section of the dashboard (called when wallet state changes)
+     */
+    async refreshWalletSection() {
+        // Only refresh if we're on the default view showing the dashboard
+        if (this.currentView !== 'default') return;
+
+        const container = document.querySelector('#dashboardWallet .dashboard-section-content');
+        if (!container) return;
+
+        if (DEBUG) console.log('Right panel: Refreshing wallet section after wallet state change');
+        await this.loadWalletSection();
+    },
+
+    /**
+     * Fetch tips received by current user (kind 9736 events)
+     */
+    async fetchTipsReceived() {
+        try {
+            const pool = window.NostrState?.pool;
+            const pubkey = window.NostrState?.publicKey;
+            if (!pool || !pubkey) return { count: 0, total: '' };
+
+            // Query Nosmero relay for tips where user is tagged
+            const relays = ['wss://relay.nosmero.com'];
+            const sevenDaysAgo = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60;
+
+            const events = await pool.querySync(relays, {
+                kinds: [9736],
+                '#p': [pubkey],
+                since: sevenDaysAgo,
+                limit: LIMITS.TIPS_LIMIT
+            });
+
+            // Sum up amounts if available
+            let totalPiconero = 0n;
+            for (const event of events) {
+                const amountTag = event.tags.find(t => t[0] === 'amount');
+                if (amountTag && amountTag[1]) {
+                    try {
+                        totalPiconero += BigInt(amountTag[1]);
+                    } catch (e) {}
+                }
+            }
+
+            const totalXMR = totalPiconero > 0n
+                ? (Number(totalPiconero) / 1e12).toFixed(4) + ' XMR'
+                : '';
+
+            return { count: events.length, total: totalXMR };
+        } catch (error) {
+            console.error('Error fetching tips received:', error);
+            return { count: 0, total: '' };
+        }
+    },
+
+    /**
+     * Load relay section content
+     */
+    async loadRelaySection() {
+        const container = document.querySelector('#dashboardRelays .dashboard-section-content');
+        if (!container) return;
+
+        try {
+            const relayModule = window.NostrRelays;
+            if (!relayModule) {
+                container.innerHTML = '<div class="dashboard-row"><span class="dashboard-value muted">Not available</span></div>';
+                return;
+            }
+
+            // Get active relays and performance data
+            const activeRelays = relayModule.getActiveRelays?.() || relayModule.DEFAULT_RELAYS || [];
+            const performance = relayModule.getRelayPerformance?.() || {};
+
+            // Test connectivity for each relay
+            const relayStatuses = await this.testRelayConnections(activeRelays, performance);
+
+            const connectedCount = relayStatuses.filter(r => r.connected).length;
+            const totalCount = relayStatuses.length;
+
+            // Build relay list HTML
+            const relayListHtml = relayStatuses.slice(0, 5).map(relay => {
+                const statusIcon = relay.connected ? '✓' : '✗';
+                const statusClass = relay.connected ? 'success' : 'error';
+                const latencyText = relay.connected && relay.latency ? `${relay.latency}ms` : '--';
+                const displayUrl = relay.url.replace('wss://', '').replace('ws://', '');
+
+                return `
+                    <div class="dashboard-relay-row">
+                        <span class="relay-status ${statusClass}">${statusIcon}</span>
+                        <span class="relay-url">${displayUrl}</span>
+                        <span class="relay-latency">${latencyText}</span>
+                    </div>
+                `;
+            }).join('');
+
+            container.innerHTML = `
+                <div class="dashboard-row" style="margin-bottom: 8px;">
+                    <span class="dashboard-label">Connected</span>
+                    <span class="dashboard-value">${connectedCount}/${totalCount}</span>
+                </div>
+                <div class="dashboard-relay-list">
+                    ${relayListHtml}
+                </div>
+                ${totalCount > 5 ? `<div class="dashboard-more">+${totalCount - 5} more</div>` : ''}
+            `;
+        } catch (error) {
+            console.error('Error loading relay section:', error);
+            container.innerHTML = '<div class="dashboard-row"><span class="dashboard-value muted">Error loading relays</span></div>';
+        }
+    },
+
+    /**
+     * Test relay connections and get latency by actually pinging each relay
+     */
+    async testRelayConnections(relays, cachedPerformance) {
+        // Ping all relays in parallel
+        const pingPromises = relays.map(url => this.pingRelay(url));
+        const results = await Promise.all(pingPromises);
+        return results;
+    },
+
+    /**
+     * Ping a single relay to check connection and measure latency
+     */
+    async pingRelay(url) {
+        const startTime = performance.now();
+
+        return new Promise((resolve) => {
+            const timeout = setTimeout(() => {
+                resolve({ url, connected: false, latency: null });
+            }, TIMEOUTS.RELAY_PING);
+
+            try {
+                const ws = new WebSocket(url);
+
+                ws.onopen = () => {
+                    const latency = Math.round(performance.now() - startTime);
+                    clearTimeout(timeout);
+                    ws.close();
+                    resolve({ url, connected: true, latency });
+                };
+
+                ws.onerror = () => {
+                    clearTimeout(timeout);
+                    resolve({ url, connected: false, latency: null });
+                };
+
+                ws.onclose = (event) => {
+                    // If closed before we resolved, it failed
+                    clearTimeout(timeout);
+                };
+            } catch (e) {
+                clearTimeout(timeout);
+                resolve({ url, connected: false, latency: null });
+            }
+        });
+    },
+
+    /**
+     * Load engagement section content
+     */
+    async loadEngagementSection() {
+        const container = document.querySelector('#dashboardEngagement .dashboard-section-content');
+        if (!container) return;
+
+        try {
+            const pool = window.NostrState?.pool;
+            const pubkey = window.NostrState?.publicKey;
+
+            if (!pool || !pubkey) {
+                container.innerHTML = '<div class="dashboard-row"><span class="dashboard-value muted">Not available</span></div>';
+                return;
+            }
+
+            const relays = window.NostrRelays?.getReadRelays?.() || window.NostrRelays?.DEFAULT_RELAYS || [];
+            const sevenDaysAgo = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60;
+
+            // Fetch engagement data in parallel
+            const [reactions, mentions, reposts, followers] = await Promise.all([
+                // Reactions to user's posts (kind 7 with p-tag)
+                this.fetchReactionsReceived(pool, relays, pubkey, sevenDaysAgo),
+                // Replies/mentions (kind 1 with p-tag)
+                this.fetchMentions(pool, relays, pubkey, sevenDaysAgo),
+                // Reposts of user's posts (kind 6 with p-tag)
+                this.fetchRepostsReceived(pool, relays, pubkey, sevenDaysAgo),
+                // New followers (kind 3 contact lists)
+                this.fetchNewFollowers(pool, relays, pubkey, sevenDaysAgo)
+            ]);
+
+            container.innerHTML = `
+                <div class="dashboard-row">
+                    <span class="dashboard-label">New followers</span>
+                    <span class="dashboard-value">${followers >= 0 ? '+' + followers : '--'}</span>
+                </div>
+                <div class="dashboard-row">
+                    <span class="dashboard-label">Reactions received</span>
+                    <span class="dashboard-value">${reactions}</span>
+                </div>
+                <div class="dashboard-row">
+                    <span class="dashboard-label">Replies & mentions</span>
+                    <span class="dashboard-value">${mentions}</span>
+                </div>
+                <div class="dashboard-row">
+                    <span class="dashboard-label">Reposts</span>
+                    <span class="dashboard-value">${reposts}</span>
+                </div>
+            `;
+        } catch (error) {
+            console.error('Error loading engagement section:', error);
+            container.innerHTML = '<div class="dashboard-row"><span class="dashboard-value muted">Error loading engagement</span></div>';
+        }
+    },
+
+    /**
+     * Fetch reactions received (kind 7)
+     */
+    async fetchReactionsReceived(pool, relays, pubkey, since) {
+        try {
+            const events = await pool.querySync(relays, {
+                kinds: [7],
+                '#p': [pubkey],
+                since,
+                limit: LIMITS.ENGAGEMENT_LIMIT
+            });
+            return events.length;
+        } catch (e) {
+            console.error('Error fetching reactions:', e);
+            return 0;
+        }
+    },
+
+    /**
+     * Fetch mentions/replies (kind 1 with p-tag)
+     */
+    async fetchMentions(pool, relays, pubkey, since) {
+        try {
+            const events = await pool.querySync(relays, {
+                kinds: [1],
+                '#p': [pubkey],
+                since,
+                limit: LIMITS.ENGAGEMENT_LIMIT
+            });
+            // Filter out own posts
+            return events.filter(e => e.pubkey !== pubkey).length;
+        } catch (e) {
+            console.error('Error fetching mentions:', e);
+            return 0;
+        }
+    },
+
+    /**
+     * Fetch reposts received (kind 6 with p-tag)
+     */
+    async fetchRepostsReceived(pool, relays, pubkey, since) {
+        try {
+            const events = await pool.querySync(relays, {
+                kinds: [6],
+                '#p': [pubkey],
+                since,
+                limit: LIMITS.REPOSTS_LIMIT
+            });
+            return events.length;
+        } catch (e) {
+            console.error('Error fetching reposts:', e);
+            return 0;
+        }
+    },
+
+    /**
+     * Fetch new followers (simplified - count recent kind 3 events that include user)
+     */
+    async fetchNewFollowers(pool, relays, pubkey, since) {
+        try {
+            // This is approximate - we query contact lists that include this user
+            const events = await pool.querySync(relays, {
+                kinds: [3],
+                '#p': [pubkey],
+                since,
+                limit: LIMITS.FOLLOWERS_LIMIT
+            });
+            // Count unique pubkeys who added user to their follow list
+            const uniqueFollowers = new Set(events.map(e => e.pubkey));
+            return uniqueFollowers.size;
+        } catch (e) {
+            console.error('Error fetching followers:', e);
+            return -1; // Return -1 to indicate error
+        }
+    },
+
+    /**
+     * Open a specific view in the right panel
+     */
+    openView(view, data = null, updateUrl = true) {
+        if (!this.isVisible()) {
+            // On mobile, fall back to modal/page behavior
+            return this.fallbackToModal(view, data);
+        }
+
+        // Verify content element exists
+        if (!this.content) {
+            this.content = document.getElementById('rightPanelContent');
+            if (!this.content) {
+                console.error('RightPanel: Cannot find content element');
+                return this.fallbackToModal(view, data);
+            }
+        }
+
+        // Push current view to history before navigating
+        // Push if: updateUrl is true, current view is not default, and either view type changed OR data changed
+        if (updateUrl && this.currentView !== 'default') {
+            const viewChanged = view !== this.currentView;
+            const dataChanged = data !== this.currentData;
+            if (viewChanged || dataChanged) {
+                this.pushToHistory();
+            }
+        }
+
+        this.currentView = view;
+        this.currentData = data;
+
+        // Add contextual class (shows close button, hides default feed)
+        if (view !== 'default') {
+            this.panel.classList.add('contextual');
+            // Deactivate all sections before showing the new one
+            const allSections = this.content.querySelectorAll('.right-panel-section');
+            allSections.forEach(section => section.classList.remove('active'));
+        } else {
+            this.panel.classList.remove('contextual');
+            // Clear history when returning to default
+            this.history = [];
+        }
+
+        // Update back button visibility
+        this.updateBackButton();
+
+        // Update URL
+        if (updateUrl) {
+            this.updateURL(view, data);
+        }
+
+        // Render the appropriate view
+        switch (view) {
+            case 'thread':
+                this.renderThread(data);
+                break;
+            case 'profile':
+                this.renderProfile(data);
+                break;
+            case 'article':
+                this.renderArticle(data);
+                break;
+            case 'pdf':
+                this.renderPdf(data);
+                break;
+            case 'settings':
+                this.renderSettings();
+                break;
+            case 'wallet':
+                this.renderWallet();
+                break;
+            case 'compose':
+                this.renderCompose();
+                break;
+            case 'reply':
+                this.renderReply(data);
+                break;
+            case 'zap':
+                this.renderZap(data);
+                break;
+            default:
+                this.loadDefaultContent();
+        }
+    },
+
+    /**
+     * Open thread view
+     */
+    openThread(noteId, updateUrl = true) {
+        this.openView('thread', noteId, updateUrl);
+    },
+
+    /**
+     * Open NIP-23 article view.
+     * `arg` is either a full kind-30023 event, or a coordinate object
+     * `{ pubkey, identifier, relayHints? }`. The reader fetches if needed.
+     */
+    openArticle(arg, updateUrl = true) {
+        this.openView('article', arg, updateUrl);
+    },
+
+    /**
+     * Open PDF reader view.
+     * `arg` is `{ url, filename? }`.
+     */
+    openPdf(arg, updateUrl = true) {
+        this.openView('pdf', arg, updateUrl);
+    },
+
+    /**
+     * Open profile view
+     */
+    openProfile(pubkey, updateUrl = true) {
+        this.openView('profile', pubkey, updateUrl);
+    },
+
+    /**
+     * Open settings
+     */
+    openSettings(updateUrl = true) {
+        this.openView('settings', null, updateUrl);
+    },
+
+    /**
+     * Open wallet
+     */
+    openWallet(updateUrl = true) {
+        this.openView('wallet', null, updateUrl);
+    },
+
+    /**
+     * Open compose
+     */
+    openCompose(updateUrl = true) {
+        this.openView('compose', null, updateUrl);
+    },
+
+    /**
+     * Open reply
+     */
+    openReply(noteId, updateUrl = true) {
+        this.openView('reply', noteId, updateUrl);
+    },
+
+    /**
+     * Open zap/tip flow
+     */
+    openZap(data, updateUrl = true) {
+        this.openView('zap', data, updateUrl);
+    },
+
+    /**
+     * Close contextual view and return to default
+     */
+    close(updateUrl = true) {
+        this.currentView = 'default';
+        this.currentData = null;
+        this.panel?.classList.remove('contextual');
+
+        // Clear navigation history
+        this.history = [];
+        this.updateBackButton();
+
+        // Clear contextual content
+        const contextualSections = this.content?.querySelectorAll('.right-panel-section');
+        contextualSections?.forEach(section => {
+            section.classList.remove('active');
+            section.innerHTML = '';
+        });
+
+        // Clear any pending media upload
+        this.currentPanelMedia = [];
+
+        // Show default feed
+        if (this.defaultFeed) {
+            this.defaultFeed.style.display = '';
+        }
+
+        // Restore the title that was set when default content was loaded
+        if (this.title) {
+            this.title.textContent = this.defaultFeedTitle;
+        }
+
+        // Update URL
+        if (updateUrl) {
+            this.updateURL('default', null);
+        }
+    },
+
+    /**
+     * Render NIP-23 article in panel.
+     * Accepts either a full kind-30023 event or a coordinate
+     * `{ pubkey, identifier, relayHints? }`.
+     */
+    async renderArticle(arg) {
+        if (!arg) return;
+        if (!this.content) {
+            console.error('renderArticle: content element not found');
+            return;
+        }
+
+        this.setTitle('Article');
+
+        let section = this.content.querySelector('.right-panel-article');
+        if (!section) {
+            section = document.createElement('div');
+            section.className = 'right-panel-section right-panel-article';
+            this.content.appendChild(section);
+        }
+        section.classList.add('active');
+        section.innerHTML = '<div class="loading" style="padding: 20px;">Loading article…</div>';
+
+        if (this.defaultFeed) {
+            this.defaultFeed.style.display = 'none';
+        }
+
+        try {
+            const Articles = await import('./articles.js');
+            let event = arg;
+
+            // If we got a coordinate (no .kind), fetch by it.
+            if (!event || event.kind !== 30023) {
+                const coord = arg.pubkey && arg.identifier !== undefined
+                    ? arg
+                    : null;
+                if (!coord) {
+                    section.innerHTML = '<div style="padding: 20px; color: var(--danger);">Bad article reference</div>';
+                    return;
+                }
+                event = await Articles.fetchArticleByCoord({
+                    pubkey: coord.pubkey,
+                    identifier: coord.identifier,
+                    relayHints: coord.relayHints || [],
+                });
+            }
+
+            if (!event) {
+                section.innerHTML = '<div style="padding: 20px; color: var(--danger);">Article not found on any relay</div>';
+                return;
+            }
+
+            // Make sure the author profile is loaded so the byline isn't a
+            // truncated pubkey.
+            try {
+                const State = window.NostrState;
+                if (State && !State.profileCache?.[event.pubkey]) {
+                    const Posts = await import('./posts.js');
+                    await Posts.fetchProfiles([event.pubkey]).catch(() => {});
+                }
+            } catch (_) {}
+
+            section.innerHTML = Articles.renderArticleReader(event);
+            Articles.wireArticleHandlers(section);
+
+            // If the article is paywalled and the user already paid, swap in
+            // the decrypted body immediately. No-op for non-paywalled articles.
+            Articles.hydrateArticlePaywall?.(section, event).catch(err => {
+                console.warn('Paywall hydration failed:', err);
+            });
+
+            // NIP-84 highlights: install the selection toolbar so the reader
+            // can publish kind 9802 over arbitrary passages, and fetch existing
+            // highlights for a heatmap overlay. Both fire async — heatmap is
+            // delayed slightly so it runs after paywall hydration mounts the
+            // decrypted body (otherwise we'd only mark the public preview).
+            (async () => {
+                try {
+                    const Highlights = await import('./highlights.js');
+                    Highlights.installSelectionToolbar(section, event);
+                    setTimeout(() => {
+                        Highlights.applyHeatmap(section, event).catch(e =>
+                            console.warn('Heatmap apply failed:', e?.message || e)
+                        );
+                    }, 800);
+                } catch (e) {
+                    console.warn('Highlights module load failed:', e?.message || e);
+                }
+            })();
+
+            // Hydrate any embedded notes / images inside the article body via
+            // the existing embedded-event loader.
+            try {
+                const Utils = await import('./utils.js');
+                if (Utils.processEmbeddedNotes) {
+                    section.id = section.id || 'rightPanelArticleSection';
+                    await Utils.processEmbeddedNotes(section.id);
+                }
+            } catch (e) {
+                console.warn('Article body embed hydration failed:', e?.message || e);
+            }
+
+            // Mount NIP-22 comment thread (kind 1111) below the article.
+            try {
+                const Comments = await import('./comments.js');
+                Comments.mountCommentThread(section, event).catch(err => {
+                    console.warn('Comment thread mount failed:', err);
+                });
+            } catch (e) {
+                console.warn('comments.js failed to load:', e?.message || e);
+            }
+        } catch (error) {
+            console.error('Error loading article:', error);
+            section.innerHTML = '<div style="padding: 20px; color: var(--danger);">Failed to load article</div>';
+        }
+    },
+
+    /**
+     * Render PDF reader in panel.
+     * `arg` is `{ url, filename? }`.
+     */
+    async renderPdf(arg) {
+        if (!arg || !arg.url) return;
+        if (!this.content) {
+            console.error('renderPdf: content element not found');
+            return;
+        }
+
+        this.setTitle('PDF');
+
+        let section = this.content.querySelector('.right-panel-pdf');
+        if (!section) {
+            section = document.createElement('div');
+            section.className = 'right-panel-section right-panel-pdf';
+            this.content.appendChild(section);
+        }
+        section.classList.add('active');
+        section.innerHTML = '<div class="loading" style="padding: 20px;">Loading PDF…</div>';
+
+        if (this.defaultFeed) {
+            this.defaultFeed.style.display = 'none';
+        }
+
+        try {
+            const PdfReader = await import('./pdf-reader.js');
+            section.innerHTML = PdfReader.renderPdfReaderShell({
+                url: arg.url,
+                filename: arg.filename,
+            });
+            await PdfReader.mountPdfReader(section);
+        } catch (e) {
+            console.error('renderPdf failed:', e);
+            section.innerHTML = `<div style="padding: 20px; color: var(--danger);">Failed to load PDF: ${e?.message || e}</div>`;
+        }
+    },
+
+    /**
+     * Render thread in panel
+     */
+    async renderThread(noteIdOrNevent) {
+        if (!noteIdOrNevent) return;
+
+        // Ensure content element exists
+        if (!this.content) {
+            console.error('renderThread: content element not found');
+            return;
+        }
+
+        this.setTitle('Thread');
+
+        // Create or get thread section
+        let section = this.content.querySelector('.right-panel-thread');
+        if (!section) {
+            section = document.createElement('div');
+            section.className = 'right-panel-section right-panel-thread';
+            this.content.appendChild(section);
+        }
+
+        section.classList.add('active');
+        section.innerHTML = '<div class="loading" style="padding: 20px;">Loading thread...</div>';
+
+        // Hide default feed
+        if (this.defaultFeed) {
+            this.defaultFeed.style.display = 'none';
+        }
+
+        try {
+            // Check if this is a nevent (starts with 'nevent1') and decode it
+            let noteId = noteIdOrNevent;
+            let relayHints = [];
+
+            if (noteIdOrNevent.startsWith('nevent1') || noteIdOrNevent.startsWith('note1')) {
+                try {
+                    const { nip19 } = window.NostrTools;
+                    const decoded = nip19.decode(noteIdOrNevent);
+                    noteId = decoded.data.id || decoded.data;
+                    if (decoded.data.relays && decoded.data.relays.length > 0) {
+                        relayHints = decoded.data.relays;
+                        if (DEBUG) console.log('📍 Thread relay hints from nevent:', relayHints);
+                    }
+                } catch (decodeError) {
+                    console.warn('Could not decode as nevent/note, using as raw ID:', decodeError);
+                }
+            }
+
+            // Fetch and render thread
+            await this.fetchAndRenderThread(noteId, section, relayHints);
+        } catch (error) {
+            console.error('Error loading thread:', error);
+            section.innerHTML = '<div style="padding: 20px; color: var(--danger);">Failed to load thread</div>';
+        }
+    },
+
+    /**
+     * Fetch and render thread manually
+     * @param {string} noteId - The note ID to fetch
+     * @param {HTMLElement} container - Container element to render into
+     * @param {string[]} relayHints - Optional relay hints from nevent
+     *
+     * TODO: This function is ~250 lines and should be refactored into smaller helpers:
+     * - buildRelayList(relayHints) - combine relay sources
+     * - fetchMainNote(noteId, relays) - fetch the clicked note
+     * - findThreadRoot(mainNote) - find root via e-tags
+     * - fetchThreadPosts(noteId, rootId, relays) - fetch all thread posts
+     * - buildThreadTree(posts, rootId) - build tree structure
+     * - renderThreadTree(tree, clickedNoteId) - render HTML
+     */
+    async fetchAndRenderThread(noteId, container, relayHints = []) {
+        const pool = window.NostrState?.pool;
+        const userRelays = window.NostrRelays?.getReadRelays?.() || window.NostrRelays?.getActiveRelays?.() || [];
+
+        // Combine: hints first, then user relays, then fallbacks
+        const relays = [...new Set([
+            ...relayHints,
+            ...userRelays,
+            ...FALLBACK_RELAYS
+        ])];
+
+        if (DEBUG) console.log('📡 Thread fetch using', relays.length, 'relays (hints:', relayHints.length, ')');
+
+        if (!pool || !relays?.length) {
+            container.innerHTML = '<div style="padding: 20px;">Cannot load thread - no relay connection</div>';
+            return;
+        }
+
+        try {
+            // Use the already-cached event if we have it. Search results, the feed, etc. cache into
+            // eventCache, and a clicked note may live on relays we don't read (e.g. NIP-50 search
+            // relays / another user's outbox), so a refetch by id from our read relays can come up
+            // empty even though we already hold the verified event → spurious "Note not found".
+            let mainNote = window.NostrState?.eventCache?.[noteId] || null;
+            if (!mainNote) {
+                const events = await pool.querySync(relays, { ids: [noteId] });
+                mainNote = (events && events.length) ? events[0] : null;
+            }
+
+            if (!mainNote) {
+                container.innerHTML = '<div style="padding: 20px;">Note not found</div>';
+                return;
+            }
+
+            // Add to event cache
+            if (window.NostrState?.eventCache) {
+                window.NostrState.eventCache[mainNote.id] = mainNote;
+            }
+
+            // Find the root of the thread by following 'e' tags
+            let rootId = noteId;
+            const eTags = mainNote.tags.filter(t => t[0] === 'e');
+            // Look for root marker first
+            for (const tag of eTags) {
+                if (tag[3] === 'root') {
+                    rootId = tag[1];
+                    break;
+                }
+            }
+            // If no root marker, use first 'e' tag (oldest ancestor reference)
+            if (rootId === noteId && eTags.length > 0) {
+                rootId = eTags[0][1];
+            }
+
+            // Fetch the root note if different from clicked note
+            let rootNote = mainNote;
+            if (rootId !== noteId) {
+                const rootEvents = await pool.querySync(relays, { ids: [rootId] });
+                if (rootEvents?.length > 0) {
+                    rootNote = rootEvents[0];
+                    if (window.NostrState?.eventCache) {
+                        window.NostrState.eventCache[rootNote.id] = rootNote;
+                    }
+                }
+            }
+
+            // Fetch all replies to the root (this gets the entire thread)
+            const replies = await pool.querySync(relays, {
+                kinds: [1],
+                '#e': [rootId],
+                limit: LIMITS.THREAD_REPLIES
+            });
+
+            // Also fetch replies to the clicked note if it's not the root
+            let clickedReplies = [];
+            if (noteId !== rootId) {
+                clickedReplies = await pool.querySync(relays, {
+                    kinds: [1],
+                    '#e': [noteId],
+                    limit: Math.floor(LIMITS.THREAD_REPLIES / 2)
+                });
+            }
+
+            // Combine all posts, deduplicating
+            const allPostsMap = new Map();
+            allPostsMap.set(rootNote.id, rootNote);
+            allPostsMap.set(mainNote.id, mainNote);
+            replies.forEach(r => allPostsMap.set(r.id, r));
+            clickedReplies.forEach(r => allPostsMap.set(r.id, r));
+
+            // Second pass: fetch replies to replies (notes might only reference their direct parent)
+            // Get IDs of all notes we've found so far (excluding root which we already queried)
+            const foundNoteIds = Array.from(allPostsMap.keys()).filter(id => id !== rootId && id !== noteId);
+            if (foundNoteIds.length > 0) {
+                // Query in batches to avoid too large requests
+                for (let i = 0; i < foundNoteIds.length; i += LIMITS.THREAD_BATCH_SIZE) {
+                    const batch = foundNoteIds.slice(i, i + LIMITS.THREAD_BATCH_SIZE);
+                    const nestedReplies = await pool.querySync(relays, {
+                        kinds: [1],
+                        '#e': batch,
+                        limit: LIMITS.NESTED_REPLIES
+                    });
+                    nestedReplies.forEach(r => allPostsMap.set(r.id, r));
+                }
+            }
+
+            // Add all to cache
+            allPostsMap.forEach((post, id) => {
+                if (window.NostrState?.eventCache) {
+                    window.NostrState.eventCache[id] = post;
+                }
+            });
+
+            const allPosts = Array.from(allPostsMap.values());
+
+            // Fetch profiles for all authors
+            const uniquePubkeys = [...new Set(allPosts.map(p => p.pubkey))];
+            const pubkeysToFetch = uniquePubkeys.filter(pk => !window.NostrState?.profileCache?.[pk]);
+            if (pubkeysToFetch.length > 0 && window.NostrPosts?.fetchProfiles) {
+                await window.NostrPosts.fetchProfiles(pubkeysToFetch);
+            }
+
+            // Fetch disclosed tips for thread posts (for verified tip badges)
+            if (window.NostrPosts?.fetchDisclosedTips) {
+                try {
+                    const disclosedTipsData = await window.NostrPosts.fetchDisclosedTips(allPosts);
+                    if (window.NostrPosts?.disclosedTipsCache) {
+                        Object.assign(window.NostrPosts.disclosedTipsCache, disclosedTipsData);
+                    }
+                } catch (tipError) {
+                    console.error('Right panel thread: Error fetching disclosed tips:', tipError);
+                }
+            }
+
+            // Fetch engagement data for thread posts
+            let threadEngagementData = {};
+            if (window.NostrPosts?.fetchEngagementCounts) {
+                try {
+                    threadEngagementData = await window.NostrPosts.fetchEngagementCounts(allPosts.map(p => p.id));
+                } catch (engageError) {
+                    console.error('Right panel thread: Error fetching engagement:', engageError);
+                }
+            }
+
+            // Build a map of posts by ID for quick lookup
+            const postMap = new Map();
+            allPosts.forEach(post => postMap.set(post.id, post));
+
+            // Build thread tree
+            const buildTree = (posts, rootId) => {
+                const nodes = new Map();
+                const roots = [];
+
+                // Create nodes for all posts
+                posts.forEach(post => {
+                    nodes.set(post.id, { post, replies: [], parentId: null });
+                });
+
+                // Link children to parents
+                posts.forEach(post => {
+                    // Find the parent ID (last 'e' tag with marker 'reply' or just the last 'e' tag)
+                    const eTags = post.tags.filter(t => t[0] === 'e');
+                    let parentId = null;
+                    for (const tag of eTags) {
+                        if (tag[3] === 'reply') {
+                            parentId = tag[1];
+                            break;
+                        }
+                    }
+                    if (!parentId && eTags.length > 0) {
+                        parentId = eTags[eTags.length - 1][1];
+                    }
+
+                    const node = nodes.get(post.id);
+                    if (parentId && nodes.has(parentId)) {
+                        node.parentId = parentId;
+                        nodes.get(parentId).replies.push(node);
+                    } else if (post.id !== rootId) {
+                        // If no parent found in thread, treat as direct reply to root
+                        const rootNode = nodes.get(rootId);
+                        if (rootNode) {
+                            node.parentId = rootId;
+                            rootNode.replies.push(node);
+                        }
+                    }
+                });
+
+                // Root is the main note
+                if (nodes.has(rootId)) {
+                    roots.push(nodes.get(rootId));
+                }
+
+                return { roots, nodes };
+            };
+
+            const { roots, nodes } = buildTree(allPosts, rootId);
+
+            // Phase 5 · Slice 2 — curation overlay (design §6.4). Prefetch each node author's Thread
+            // Index so curate() can apply synchronously; best-effort, never blocks the view.
+            const [ThreadIndex, CurateUI] = await Promise.all([
+                import('./nosdag/thread-index.js'),
+                import('./nosdag/thread-curate-ui.js')
+            ]);
+            const viewerPubkey = window.NostrState?.publicKey || null;
+            const indexPairs = [];
+            nodes.forEach((n) => { if (n.replies && n.replies.length) indexPairs.push({ postId: n.post.id, author: n.post.pubkey }); });
+            try { await ThreadIndex.prefetch(indexPairs); } catch (e) { console.warn('[nosdag] thread-index prefetch failed:', e); }
+
+            // Render using NostrPosts.renderSinglePost with hierarchy
+            let html = '';
+            const clickedNoteId = noteId; // Remember which note was clicked for highlighting
+
+            const renderNode = async (node, depth = 0, parentNode = null) => {
+                const indent = Math.min(depth * 16, 80); // Smaller indent for right panel
+                let nodeHtml = '';
+                const isClickedNote = node.post.id === clickedNoteId;
+
+                // Add "Replying to" indicator for replies
+                if (parentNode && depth > 0) {
+                    const parentProfile = window.NostrState?.profileCache?.[parentNode.post.pubkey];
+                    const parentName = parentProfile?.name || parentProfile?.display_name || parentNode.post.pubkey.slice(0, 8) + '...';
+                    nodeHtml += `<div style="margin-left: ${indent}px; margin-bottom: 4px; display: flex; align-items: center; gap: 6px;">
+                        <div style="width: 2px; height: 12px; background: #444; margin-left: 12px;"></div>
+                        <span style="color: #666; font-size: 11px;">↑ Replying to <span style="color: #888;">@${parentName}</span></span>
+                    </div>`;
+                }
+
+                // Highlight the clicked note with a border
+                const highlightStyle = isClickedNote ? 'border: 2px solid var(--nd-accent); border-radius: 8px;' : '';
+                nodeHtml += `<div style="margin-left: ${indent}px; ${depth > 0 ? 'border-left: 2px solid #333; padding-left: 8px;' : ''} ${highlightStyle}">`;
+                if (window.NostrPosts?.renderSinglePost) {
+                    nodeHtml += await window.NostrPosts.renderSinglePost(node.post, isClickedNote ? 'highlight' : 'thread', threadEngagementData, null);
+                } else {
+                    nodeHtml += `<div class="post" style="padding: 12px; border-bottom: 1px solid var(--border-color);">
+                        ${this.escapeHtml(node.post.content)}
+                    </div>`;
+                }
+                nodeHtml += '</div>';
+
+                // ----- Phase 5 · Slice 2: this node author's Thread Index curation overlay (§6.4) -----
+                // Perspectival: each node's direct replies are curated by THAT node's author, recursively.
+                node.replies.sort((a, b) => a.post.created_at - b.post.created_at);
+                const childIndent = Math.min((depth + 1) * 16, 80);
+                const isOwner = !!viewerPubkey && viewerPubkey === node.post.pubkey;
+                let curated;
+                try { curated = ThreadIndex.curate(node.post.id, node.post.pubkey, node.replies); }
+                catch { curated = { shown: node.replies.slice(), unendorsed: [], hasIndex: false }; }
+
+                for (const childNode of curated.shown) {
+                    nodeHtml += await renderNode(childNode, depth + 1, node);
+                    if (isOwner && curated.hasIndex && ThreadIndex.isApproved(node.post.id, childNode.post.id)) {
+                        nodeHtml += CurateUI.ownerControls(node.post.id, childNode.post.id, childIndent);
+                    }
+                }
+
+                if (isOwner && curated.unendorsed.length) {
+                    nodeHtml += CurateUI.unendorsedOpen(curated.unendorsed.length, childIndent);
+                    for (const childNode of curated.unendorsed) {
+                        nodeHtml += '<div class="nd-unend-item">';
+                        nodeHtml += await renderNode(childNode, depth + 1, node);
+                        nodeHtml += CurateUI.triageBar(node.post.id, childNode.post.id, childNode.post.pubkey, childIndent);
+                        nodeHtml += '</div>';
+                    }
+                    nodeHtml += CurateUI.unendorsedClose();
+                }
+
+                return nodeHtml;
+            };
+
+            for (const root of roots) {
+                html += await renderNode(root, 0, null);
+            }
+
+            // Phase 5 · Slice 4 — "Follow this conversation" control bar (consumption tiers, §6.2),
+            // keyed on the conversation root. Author-curated only: following pulls + hosts.
+            let CT = null;
+            let tfBar = '';
+            try {
+                CT = await import('./nosdag/consumption-tiers.js');
+                tfBar = CT.followControlHtml(rootId);
+            } catch (e) { console.warn('[nosdag] thread-follow control unavailable:', e); }
+
+            container.innerHTML = tfBar + html;
+
+            // Phase 5 · Slice 2 — wire the curation controls; refresh re-opens this same thread.
+            CurateUI.wireCurationClicks(container, () => { try { window.RightPanel?.openThread(noteId, false); } catch (e) { /* ignore */ } });
+
+            // Phase 5 · Slice 4 — wire the follow toggle + live repaint while this thread is shown
+            // (the container detaches when the panel reverts to the deck → isConnected guards it).
+            if (CT) {
+                CT.wireFollowControl(container, rootId);
+                CT.markOpenThread(rootId,
+                    () => { try { window.RightPanel?.openThread(noteId, false); } catch (e) { /* ignore */ } },
+                    () => container.isConnected);
+            }
+
+            // Reveal paywalled notes this user has already unlocked (the right
+            // panel otherwise skips paywall processing, leaving them locked).
+            try {
+                const PaywallUI = await import('./paywall-ui.js');
+                await PaywallUI.processPaywalledNotes(container);
+            } catch (paywallError) {
+                console.error('Right panel thread: Error processing paywalled notes:', paywallError);
+            }
+
+            // Process embedded notes (quote reposts)
+            try {
+                // Ensure container has an ID for processEmbeddedNotes
+                if (!container.id) {
+                    container.id = 'rightPanelThreadContent';
+                }
+                const Utils = await import('./utils.js');
+                await Utils.processEmbeddedNotes(container.id);
+            } catch (embedError) {
+                console.error('Right panel thread: Error processing embedded notes:', embedError);
+            }
+
+            // Add trust badges
+            try {
+                if (window.NostrTrustBadges?.addFeedTrustBadges) {
+                    await window.NostrTrustBadges.addFeedTrustBadges(
+                        allPosts.map(p => ({ id: p.id, pubkey: p.pubkey })),
+                        '.right-panel-thread'
+                    );
+                }
+            } catch (badgeError) {
+                console.error('Right panel thread: Error adding trust badges:', badgeError);
+            }
+        } catch (error) {
+            throw error;
+        }
+    },
+
+    /**
+     * Render profile in panel
+     */
+    async renderProfile(pubkey) {
+        if (!pubkey) return;
+
+        // Ensure content element exists
+        if (!this.content) {
+            this.content = document.getElementById('rightPanelContent');
+            if (!this.content) {
+                console.error('RightPanel: Cannot find content element');
+                return;
+            }
+        }
+
+        this.setTitle('Profile');
+
+        let section = this.content.querySelector('.right-panel-profile');
+        if (!section) {
+            section = document.createElement('div');
+            section.className = 'right-panel-section right-panel-profile';
+            this.content.appendChild(section);
+        }
+
+        section.classList.add('active');
+
+        if (this.defaultFeed) {
+            this.defaultFeed.style.display = 'none';
+        }
+
+        // NIP-51 muted-user block: short-circuit before rendering any posts.
+        try {
+            const Lists = await import('./lists.js');
+            if (Lists.lists.mutePubkeys.has(pubkey)) {
+                section.innerHTML = `
+                    <div style="padding: 32px 20px; text-align: center;">
+                        <div style="font-size: 36px; margin-bottom: 12px;">🔇</div>
+                        <div style="color: #fff; font-weight: 600; font-size: 16px; margin-bottom: 6px;">Posts are not viewable</div>
+                        <div style="color: #aaa; font-size: 14px; margin-bottom: 20px;">You have muted this user.</div>
+                        <button id="rightPanelUnmuteBtn" style="background: linear-gradient(135deg, var(--nd-accent-hi), var(--nd-accent)); border: none; color: #fff; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600;">Unmute and view profile</button>
+                    </div>
+                `;
+                const btn = section.querySelector('#rightPanelUnmuteBtn');
+                if (btn) {
+                    btn.addEventListener('click', async () => {
+                        try {
+                            await Lists.unmuteUser(pubkey);
+                            this.renderProfile(pubkey); // re-render once unmuted
+                        } catch (e) {
+                            console.error('Unmute failed:', e);
+                        }
+                    });
+                }
+                return;
+            }
+        } catch (e) {
+            console.warn('Mute check skipped in renderProfile:', e?.message || e);
+        }
+
+        section.innerHTML = '<div class="loading" style="padding: 20px; text-align: center;">Loading profile...</div>';
+
+        try {
+            // Fetch profile
+            if (window.NostrPosts?.fetchProfiles) {
+                await window.NostrPosts.fetchProfiles([pubkey]);
+            }
+
+            let userProfile = window.NostrState?.profileCache?.[pubkey];
+            if (!userProfile) {
+                userProfile = {
+                    pubkey: pubkey,
+                    name: 'Anonymous',
+                    picture: null,
+                    about: 'No profile information available'
+                };
+            }
+
+            // Render profile header with ThumbHash progressive loading
+            const avatarPlaceholder = userProfile.picture ? window.ThumbHashLoader?.getPlaceholder(userProfile.picture) : null;
+            // Escape user-controlled profile fields to prevent XSS
+            const safeName = this.escapeHtml(userProfile.name || 'Anonymous');
+            const safeNip05 = userProfile.nip05 ? this.escapeHtml(userProfile.nip05) : '';
+            // For website, validate it's a proper URL and escape for display
+            let safeWebsiteHref = '';
+            let safeWebsiteDisplay = '';
+            if (userProfile.website) {
+                const websiteUrl = userProfile.website.startsWith('http://') || userProfile.website.startsWith('https://')
+                    ? userProfile.website
+                    : 'https://' + userProfile.website;
+                // Only allow http/https URLs to prevent javascript: injection
+                if (websiteUrl.startsWith('http://') || websiteUrl.startsWith('https://')) {
+                    safeWebsiteHref = this.escapeHtml(websiteUrl);
+                    safeWebsiteDisplay = this.escapeHtml(userProfile.website);
+                }
+            }
+            section.innerHTML = `
+                <div style="padding: 16px;">
+                    <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 16px;">
+                        ${userProfile.picture ?
+                            `<img src="${avatarPlaceholder || userProfile.picture}" data-thumbhash-src="${userProfile.picture}" style="width: 64px; height: 64px; border-radius: 50%; object-fit: cover;${avatarPlaceholder ? ' filter: blur(4px); transition: filter 0.3s;' : ''}"
+                                 onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" onload="window.ThumbHashLoader?.onImageLoad(this)">
+                             <div style="width: 64px; height: 64px; border-radius: 50%; background: linear-gradient(135deg, var(--nd-accent-hi), var(--nd-accent)); display: none; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 20px;">${safeName.charAt(0).toUpperCase()}</div>` :
+                            `<div style="width: 64px; height: 64px; border-radius: 50%; background: linear-gradient(135deg, var(--nd-accent-hi), var(--nd-accent)); display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 20px;">${safeName.charAt(0).toUpperCase()}</div>`
+                        }
+                        <div style="flex: 1; min-width: 0;">
+                            <h2 class="profile-name" data-pubkey="${pubkey}" style="color: var(--text-primary); font-size: 18px; margin: 0 0 4px 0; word-wrap: break-word;">${safeName}</h2>
+                            <p style="margin: 0; color: var(--text-muted); font-family: monospace; font-size: 12px; word-break: break-all;">${pubkey.substring(0, 8)}...${pubkey.substring(56)}</p>
+                            ${safeNip05 ? `<div style="color: #10B981; font-size: 12px; margin-top: 4px;">✅ ${safeNip05}</div>` : ''}
+                        </div>
+                    </div>
+                    ${userProfile.about ? `<div style="color: var(--text-secondary); font-size: 14px; line-height: 1.4; margin-bottom: 12px; word-wrap: break-word;">${this.escapeHtml(userProfile.about)}</div>` : ''}
+                    ${safeWebsiteHref ? `<div style="margin-bottom: 8px;"><a href="${safeWebsiteHref}" target="_blank" rel="noopener noreferrer" style="color: var(--nd-accent); text-decoration: none; font-size: 13px;">🔗 ${safeWebsiteDisplay}</a></div>` : ''}
+                    <div id="panelProfileMoneroAddress"></div>
+                    <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;">
+                        <button id="panelFollowBtn_${pubkey}" onclick="toggleFollow('${pubkey}')" style="background: linear-gradient(135deg, var(--nd-accent-hi), var(--nd-accent)); border: none; border-radius: 6px; color: #fff; padding: 6px 12px; cursor: pointer; font-size: 13px; font-weight: bold;">
+                            Follow
+                        </button>
+                        <button onclick="copyUserNpub('${pubkey}')" style="background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 6px; color: #9aa4b4; padding: 6px 12px; cursor: pointer; font-size: 13px;">📋 Copy npub</button>
+                        <button onclick="viewUserProfilePage('${pubkey}', true)" style="background: color-mix(in srgb, var(--nd-accent) 20%, transparent); border: 1px solid var(--nd-accent); border-radius: 6px; color: var(--nd-accent); padding: 6px 12px; cursor: pointer; font-size: 13px;">View Full Profile</button>
+                    </div>
+                </div>
+                <div class="panel-profile-tabs" style="border-top: 1px solid var(--border-color); padding: 0; background: rgba(0,0,0,0.2); display: flex; gap: 0;">
+                    <button class="panel-profile-tab active" data-profile-tab="notes" data-profile-pubkey="${pubkey}" style="flex: 1; padding: 8px 16px; background: none; border: none; border-bottom: 2px solid var(--accent-color, #f60); color: #ddd; font-size: 13px; cursor: pointer;">Notes</button>
+                    <button class="panel-profile-tab" data-profile-tab="articles" data-profile-pubkey="${pubkey}" style="flex: 1; padding: 8px 16px; background: none; border: none; border-bottom: 2px solid transparent; color: #888; font-size: 13px; cursor: pointer;">Articles</button>
+                    <button class="panel-profile-tab" data-profile-tab="highlights" data-profile-pubkey="${pubkey}" style="flex: 1; padding: 8px 16px; background: none; border: none; border-bottom: 2px solid transparent; color: #888; font-size: 13px; cursor: pointer;">Highlights</button>
+                </div>
+                <div id="panelProfilePosts" style="padding: 0;">
+                    <div class="loading" style="padding: 20px; text-align: center;">Loading notes...</div>
+                </div>
+                <div id="panelProfileArticles" style="padding: 0; display: none;"></div>
+                <div id="panelProfileHighlights" style="padding: 0; display: none;"></div>
+            `;
+
+            // Update follow button state
+            this.updatePanelFollowButton(pubkey);
+
+            // Load Monero address
+            this.loadPanelMoneroAddress(pubkey);
+
+            // Wire Notes/Articles tab switching
+            this.wireProfileTabSwitcher(pubkey);
+
+            // Add trust badge
+            try {
+                if (window.NostrTrustBadges?.addProfileTrustBadge) {
+                    setTimeout(() => {
+                        window.NostrTrustBadges.addProfileTrustBadge(pubkey, '.right-panel-profile');
+                    }, TIMEOUTS.TRUST_BADGE_DELAY);
+                }
+            } catch (e) {
+                console.error('Error adding trust badge:', e);
+            }
+
+            // Fetch and display user's posts
+            await this.fetchPanelProfilePosts(pubkey);
+
+        } catch (error) {
+            console.error('Error loading profile:', error);
+            section.innerHTML = '<div style="padding: 20px; color: var(--danger);">Failed to load profile</div>';
+        }
+    },
+
+    /**
+     * Update follow button in panel
+     */
+    async updatePanelFollowButton(pubkey) {
+        const btn = document.getElementById(`panelFollowBtn_${pubkey}`);
+        if (!btn) return;
+
+        const isFollowing = window.NostrState?.followingUsers?.has(pubkey);
+        if (isFollowing) {
+            btn.textContent = 'Following';
+            btn.style.background = 'color-mix(in srgb, var(--nd-accent) 14%, transparent)';
+            btn.style.border = '1px solid color-mix(in srgb, var(--nd-accent) 45%, transparent)';
+            btn.style.color = 'var(--nd-accent)';
+        } else {
+            btn.textContent = 'Follow';
+            btn.style.background = 'linear-gradient(135deg, var(--nd-accent-hi), var(--nd-accent))';
+            btn.style.border = 'none';
+            btn.style.color = '#fff';
+        }
+    },
+
+    /**
+     * Load Monero address for panel profile
+     */
+    async loadPanelMoneroAddress(pubkey) {
+        const container = document.getElementById('panelProfileMoneroAddress');
+        if (!container) return;
+
+        try {
+            let moneroAddress = null;
+            if (window.getUserMoneroAddress) {
+                moneroAddress = await window.getUserMoneroAddress(pubkey);
+            }
+
+            if (moneroAddress && moneroAddress.trim()) {
+                // Validate Monero address format (primary: 95 chars starting with 4, subaddress: 95 chars starting with 8)
+                const isValidMoneroAddress = /^[48][1-9A-HJ-NP-Za-km-z]{94}$/.test(moneroAddress);
+                if (!isValidMoneroAddress) {
+                    console.warn('Invalid Monero address format in profile');
+                    return;
+                }
+
+                const shortAddress = `${moneroAddress.substring(0, 8)}...${moneroAddress.substring(moneroAddress.length - 8)}`;
+                const isOwnProfile = pubkey === window.NostrState?.publicKey;
+                container.innerHTML = `
+                    <div style="background: color-mix(in srgb, var(--nd-accent) 10%, transparent); border: 1px solid var(--nd-accent); border-radius: 6px; padding: 8px; margin-top: 8px;">
+                        <div style="color: var(--nd-accent); font-size: 11px; font-weight: bold; margin-bottom: 2px; display: flex; align-items: center; justify-content: space-between;">
+                            <span>💰 MONERO</span>
+                            <span style="display: flex; gap: 4px;">
+                                ${isOwnProfile ? '' : `<button class="panel-tip-monero-btn" style="background: var(--nd-accent); border: 1px solid var(--nd-accent); color: var(--nd-on-accent); padding: 1px 6px; border-radius: 3px; cursor: pointer; font-size: 9px; font-weight: bold;">
+                                    Tip
+                                </button>`}
+                                <button class="panel-copy-monero-btn" style="background: none; border: 1px solid var(--nd-accent); color: var(--nd-accent); padding: 1px 4px; border-radius: 3px; cursor: pointer; font-size: 9px;">
+                                    Copy
+                                </button>
+                            </span>
+                        </div>
+                        <div style="color: var(--text-primary); font-family: monospace; font-size: 12px;">${shortAddress}</div>
+                    </div>
+                `;
+
+                // Add event listener instead of inline onclick (XSS prevention)
+                container.querySelector('.panel-copy-monero-btn')?.addEventListener('click', () => {
+                    navigator.clipboard.writeText(moneroAddress);
+                    window.NostrUtils?.showNotification?.('Copied!', 'success');
+                });
+                // Direct user tip: same zap flow as a note, with no note reference.
+                container.querySelector('.panel-tip-monero-btn')?.addEventListener('click', () => {
+                    if (!window.NostrState?.publicKey) {
+                        window.NostrUtils?.showNotification?.('Log in to send a tip', 'error');
+                        return;
+                    }
+                    const name = window.NostrState?.profileCache?.[pubkey]?.name || 'this user';
+                    window.openZapModal?.('', name, moneroAddress, 'choose', null, pubkey);
+                });
+            }
+        } catch (error) {
+            console.error('Error loading Monero address:', error);
+        }
+    },
+
+    /**
+     * Fetch and display user posts in panel (with pagination support)
+     */
+    /**
+     * Wire click handlers for the Notes/Articles tab bar on a profile view.
+     * Idempotent — re-wires if the panel re-renders.
+     */
+    wireProfileTabSwitcher(pubkey) {
+        const tabs = this.content?.querySelectorAll('.panel-profile-tab');
+        if (!tabs || !tabs.length) return;
+        const notesBox = document.getElementById('panelProfilePosts');
+        const articlesBox = document.getElementById('panelProfileArticles');
+        const highlightsBox = document.getElementById('panelProfileHighlights');
+        let articlesLoaded = false;
+        let highlightsLoaded = false;
+
+        const activate = (which) => {
+            tabs.forEach(t => {
+                const isActive = t.dataset.profileTab === which;
+                t.classList.toggle('active', isActive);
+                t.style.color = isActive ? '#ddd' : '#888';
+                t.style.borderBottomColor = isActive
+                    ? 'var(--accent-color, #f60)'
+                    : 'transparent';
+            });
+            if (notesBox) notesBox.style.display = (which === 'notes') ? '' : 'none';
+            if (articlesBox) articlesBox.style.display = (which === 'articles') ? '' : 'none';
+            if (highlightsBox) highlightsBox.style.display = (which === 'highlights') ? '' : 'none';
+
+            if (which === 'articles' && !articlesLoaded) {
+                articlesLoaded = true;
+                this.fetchPanelProfileArticles(pubkey).catch(e => {
+                    console.warn('Failed to fetch panel profile articles:', e);
+                    if (articlesBox) {
+                        articlesBox.innerHTML = '<div style="padding: 20px; color: #aaa;">Failed to load articles.</div>';
+                    }
+                });
+            }
+            if (which === 'highlights' && !highlightsLoaded) {
+                highlightsLoaded = true;
+                this.fetchPanelProfileHighlights(pubkey).catch(e => {
+                    console.warn('Failed to fetch panel profile highlights:', e);
+                    if (highlightsBox) {
+                        highlightsBox.innerHTML = '<div style="padding: 20px; color: #aaa;">Failed to load highlights.</div>';
+                    }
+                });
+            }
+        };
+
+        tabs.forEach(tab => {
+            tab.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                activate(tab.dataset.profileTab);
+            });
+        });
+    },
+
+    /**
+     * Fetch and render kind-9802 highlights for a profile (NIP-84).
+     */
+    async fetchPanelProfileHighlights(pubkey) {
+        const box = document.getElementById('panelProfileHighlights');
+        if (!box) return;
+        box.innerHTML = '<div class="loading" style="padding: 20px; text-align: center;">Loading highlights…</div>';
+        try {
+            const Highlights = await import('./highlights.js');
+            const events = await Highlights.fetchHighlightsByAuthor(pubkey, { limit: 50 });
+            if (!events.length) {
+                box.innerHTML = '<div style="padding: 20px; color: #888; text-align: center;">No highlights yet.</div>';
+                return;
+            }
+            box.innerHTML = `<div class="highlights-feed" style="padding: 12px;">${
+                events.map(ev => Highlights.renderHighlightCard(ev)).join('')
+            }</div>`;
+            Highlights.wireHighlightHandlers(box);
+        } catch (e) {
+            console.error('fetchPanelProfileHighlights failed:', e);
+            box.innerHTML = '<div style="padding: 20px; color: #aaa;">Failed to load highlights.</div>';
+        }
+    },
+
+    /**
+     * Fetch and render kind-30023 articles for a profile.
+     */
+    async fetchPanelProfileArticles(pubkey) {
+        const box = document.getElementById('panelProfileArticles');
+        if (!box) return;
+        box.innerHTML = '<div class="loading" style="padding: 20px; text-align: center;">Loading articles…</div>';
+
+        try {
+            const Articles = await import('./articles.js');
+            const events = await Articles.queryArticles({ authors: [pubkey], limit: 30 });
+            if (!events.length) {
+                box.innerHTML = '<div style="padding: 20px; color: #888; text-align: center;">No articles yet.</div>';
+                return;
+            }
+            box.innerHTML = `<div class="articles-feed" style="padding: 12px;">${
+                events.map(ev => Articles.renderArticleCard(ev)).join('')
+            }</div>`;
+            Articles.wireArticleHandlers(box);
+        } catch (e) {
+            console.error('fetchPanelProfileArticles failed:', e);
+            box.innerHTML = '<div style="padding: 20px; color: #aaa;">Failed to load articles.</div>';
+        }
+    },
+
+    async fetchPanelProfilePosts(pubkey, loadMore = false) {
+        const container = document.getElementById('panelProfilePosts');
+        if (!container) return;
+
+        const pool = window.NostrState?.pool;
+        const userRelays = window.NostrRelays?.getReadRelays?.() || window.NostrRelays?.getActiveRelays?.() || [];
+
+        if (!pool) {
+            container.innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">No relay connection</div>';
+            return;
+        }
+
+        // Reset pagination state for new profile
+        if (!loadMore || this.profilePubkey !== pubkey) {
+            this.profilePostsLoaded = [];
+            this.profilePubkey = pubkey;
+            this.profileOldestTimestamp = null;
+        }
+
+        // Show loading indicator
+        if (loadMore) {
+            const loadMoreBtn = container.querySelector('.panel-load-more-btn');
+            if (loadMoreBtn) {
+                loadMoreBtn.textContent = 'Loading...';
+                loadMoreBtn.disabled = true;
+            }
+        }
+
+        try {
+            // Get the author's outbox relays (where they publish their posts)
+            let authorOutboxRelays = [];
+            if (window.NostrRelays?.getOutboxRelays) {
+                try {
+                    authorOutboxRelays = await window.NostrRelays.getOutboxRelays(pubkey);
+                    if (DEBUG) console.log('📤 Author outbox relays:', authorOutboxRelays.length);
+                } catch (e) {
+                    console.warn('Could not fetch author outbox relays:', e);
+                }
+            }
+
+            // Combine: author's outbox first, then user relays, then fallbacks
+            const relays = [...new Set([
+                ...authorOutboxRelays,
+                ...userRelays,
+                ...FALLBACK_RELAYS
+            ])];
+
+            if (DEBUG) console.log('📡 Fetching profile notes from', relays.length, 'relays (outbox:', authorOutboxRelays.length, ')');
+
+            // Build query with pagination
+            const query = {
+                kinds: [1],
+                authors: [pubkey],
+                limit: LIMITS.PROFILE_POSTS
+            };
+
+            // For load more, fetch posts older than the oldest we have
+            if (loadMore && this.profileOldestTimestamp) {
+                query.until = this.profileOldestTimestamp - 1;
+            }
+
+            let posts = await pool.querySync(relays, query);
+
+            // Own profile with silent relays (cold Tor start): the local node holds the
+            // authoritative copy of the user's own notes — chain + timeline archive —
+            // serve from it and let the normal pipeline below render them.
+            if ((!posts || posts.length === 0) && !loadMore && pubkey === window.NostrState?.publicKey) {
+                try {
+                    const [{ getLocalHead }, DagRead] = await Promise.all([
+                        import('./nosdag/dag-publish.js'),
+                        import('./nosdag/dag-read.js')
+                    ]);
+                    const head = getLocalHead(pubkey);
+                    const chainNotes = head ? await DagRead.walkNotes(head, { limit: LIMITS.PROFILE_POSTS, author: pubkey }) : [];
+                    const relays = window.NostrRelays?.getReadRelays?.() || [];
+                    const arc = await DagRead.readAuthorArchive(pubkey, { pool: window.NostrState?.pool, relays, limit: LIMITS.PROFILE_POSTS });
+                    let archiveNotes = arc.notes;
+                    if (archiveNotes.length) {
+                        const deleted = await DagRead.fetchDeletedIds(pubkey, archiveNotes.map(n => n.id), window.NostrState?.pool, relays);
+                        archiveNotes = archiveNotes.filter(n => !deleted.has(n.id));
+                    }
+                    const byId = new Map();
+                    for (const n of [...chainNotes, ...archiveNotes]) if (n?.id && !byId.has(n.id)) byId.set(n.id, n);
+                    posts = [...byId.values()];
+                    if (posts.length) console.log(`[nosdag] panel profile notes served from the local node (${posts.length})`);
+                } catch (e) {
+                    console.warn('[nosdag] panel own-notes local fallback failed:', e?.message || e);
+                }
+            }
+
+            // Own profile: after the relay pages run dry, the timeline archive serves as the
+            // terminal page. The loadedIds dedupe below drops anything already shown, and a
+            // second pass yields nothing new → the normal "No more notes" ending.
+            if ((!posts || posts.length === 0) && loadMore && pubkey === window.NostrState?.publicKey) {
+                try {
+                    const DagRead = await import('./nosdag/dag-read.js');
+                    const relays = window.NostrRelays?.getReadRelays?.() || [];
+                    const arc = await DagRead.readAuthorArchive(pubkey, { pool: window.NostrState?.pool, relays });
+                    let tail = arc.notes;
+                    if (tail.length) {
+                        const deleted = await DagRead.fetchDeletedIds(pubkey, tail.map(n => n.id), window.NostrState?.pool, relays);
+                        tail = tail.filter(n => !deleted.has(n.id));
+                    }
+                    if (tail.length) posts = tail;
+                } catch (e) {
+                    console.warn('[nosdag] archive terminal page failed:', e?.message || e);
+                }
+            }
+
+            if (!posts || posts.length === 0) {
+                if (!loadMore) {
+                    container.innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">No notes found</div>';
+                } else {
+                    // Remove load more button if no more posts
+                    const loadMoreBtn = container.querySelector('.panel-load-more-btn');
+                    if (loadMoreBtn) {
+                        loadMoreBtn.textContent = 'No more notes';
+                        loadMoreBtn.disabled = true;
+                    }
+                }
+                return;
+            }
+
+            // Sort by date and filter out already loaded posts
+            posts.sort((a, b) => b.created_at - a.created_at);
+            const loadedIds = new Set(this.profilePostsLoaded.map(p => p.id));
+            const newPosts = posts.filter(p => !loadedIds.has(p.id));
+
+            if (newPosts.length === 0) {
+                const loadMoreBtn = container.querySelector('.panel-load-more-btn');
+                if (loadMoreBtn) {
+                    loadMoreBtn.textContent = 'No more notes';
+                    loadMoreBtn.disabled = true;
+                }
+                return;
+            }
+
+            // Update pagination state
+            this.profilePostsLoaded = [...this.profilePostsLoaded, ...newPosts];
+            this.profileOldestTimestamp = newPosts[newPosts.length - 1].created_at;
+
+            // Add to cache
+            newPosts.forEach(post => {
+                if (window.NostrState?.eventCache) {
+                    window.NostrState.eventCache[post.id] = post;
+                }
+            });
+
+            // Fetch disclosed tips, engagement, and parent posts for new posts
+            let parentPostsMap = {};
+            let engagementData = {};
+
+            if (window.NostrPosts?.fetchDisclosedTips) {
+                try {
+                    const disclosedTipsData = await window.NostrPosts.fetchDisclosedTips(newPosts);
+                    if (window.NostrPosts?.disclosedTipsCache) {
+                        Object.assign(window.NostrPosts.disclosedTipsCache, disclosedTipsData);
+                    }
+                } catch (tipError) {
+                    console.error('Right panel profile: Error fetching disclosed tips:', tipError);
+                }
+            }
+
+            // Fetch engagement data (replies, reactions, zaps)
+            if (window.NostrPosts?.fetchEngagementCounts) {
+                try {
+                    engagementData = await window.NostrPosts.fetchEngagementCounts(newPosts.map(p => p.id));
+                } catch (engageError) {
+                    console.error('Right panel profile: Error fetching engagement:', engageError);
+                }
+            }
+
+            // Fetch parent posts for replies (shows reply context)
+            if (window.NostrPosts?.fetchParentPosts) {
+                try {
+                    // Use combined relays (user's + public fallbacks) for better coverage
+                    const parentRelays = window.NostrPosts.getParentPostRelays?.() || FALLBACK_RELAYS;
+                    parentPostsMap = await window.NostrPosts.fetchParentPosts(newPosts, parentRelays);
+                } catch (parentError) {
+                    console.error('Right panel profile: Error fetching parent posts:', parentError);
+                }
+            }
+
+            // Render posts with parent context and engagement data
+            if (window.NostrPosts?.renderSinglePost) {
+                const rendered = await Promise.all(
+                    newPosts.map(post => window.NostrPosts.renderSinglePost(post, 'feed', engagementData, parentPostsMap))
+                );
+
+                if (loadMore) {
+                    // Remove old load more button and append new posts
+                    const loadMoreBtn = container.querySelector('.panel-load-more-container');
+                    if (loadMoreBtn) loadMoreBtn.remove();
+                    container.insertAdjacentHTML('beforeend', rendered.join(''));
+                } else {
+                    container.innerHTML = rendered.join('');
+                }
+
+                // Add Load More button if we got a full page of results
+                if (newPosts.length >= LIMITS.PROFILE_POSTS) {
+                    const loadMoreHtml = `
+                        <div class="panel-load-more-container" style="padding: 16px; text-align: center;">
+                            <button class="panel-load-more-btn" style="background: color-mix(in srgb, var(--nd-accent) 20%, transparent); border: 1px solid var(--nd-accent); color: var(--nd-accent); padding: 8px 24px; border-radius: 8px; cursor: pointer; font-size: 14px;">
+                                Load More
+                            </button>
+                        </div>
+                    `;
+                    container.insertAdjacentHTML('beforeend', loadMoreHtml);
+
+                    // Add event listener
+                    container.querySelector('.panel-load-more-btn')?.addEventListener('click', () => {
+                        this.fetchPanelProfilePosts(pubkey, true);
+                    });
+                }
+
+                // Process embedded notes (quote reposts)
+                try {
+                    const Utils = await import('./utils.js');
+                    await Utils.processEmbeddedNotes('panelProfilePosts');
+                } catch (embedError) {
+                    console.error('Right panel profile: Error processing embedded notes:', embedError);
+                }
+
+                // Add trust badges to profile posts (using async mode for reliable display)
+                try {
+                    const TrustBadges = await import('./trust-badges.js');
+                    const usernameElements = container.querySelectorAll('.username[data-pubkey]');
+                    for (const usernameEl of usernameElements) {
+                        const pk = usernameEl.getAttribute('data-pubkey');
+                        if (pk && !usernameEl.querySelector('.trust-badge')) {
+                            await TrustBadges.addTrustBadgeToElement(usernameEl, pk, true);
+                        }
+                    }
+                } catch (badgeError) {
+                    console.error('Right panel profile: Error adding trust badges:', badgeError);
+                }
+
+                // Reveal paywalled notes this user has already unlocked. Unlike the
+                // other note views (search/feed/profile-page/thread), the right panel
+                // never ran paywall processing, so unlocked notes stayed locked here.
+                try {
+                    const PaywallUI = await import('./paywall-ui.js');
+                    await PaywallUI.processPaywalledNotes(container);
+                } catch (paywallError) {
+                    console.error('Right panel profile: Error processing paywalled notes:', paywallError);
+                }
+            } else {
+                const postsHtml = newPosts.map(post => `
+                    <div class="post" style="padding: 12px; border-bottom: 1px solid var(--border-color);">
+                        ${this.escapeHtml(post.content.substring(0, 200))}${post.content.length > 200 ? '...' : ''}
+                    </div>
+                `).join('');
+
+                if (loadMore) {
+                    const loadMoreBtn = container.querySelector('.panel-load-more-container');
+                    if (loadMoreBtn) loadMoreBtn.remove();
+                    container.insertAdjacentHTML('beforeend', postsHtml);
+                } else {
+                    container.innerHTML = postsHtml;
+                }
+            }
+        } catch (error) {
+            console.error('Error fetching profile posts:', error);
+            if (!loadMore) {
+                container.innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">Failed to load posts</div>';
+            } else {
+                const loadMoreBtn = container.querySelector('.panel-load-more-btn');
+                if (loadMoreBtn) {
+                    loadMoreBtn.textContent = 'Load More';
+                    loadMoreBtn.disabled = false;
+                }
+            }
+        }
+    },
+
+    /**
+     * Render settings in panel
+     * For now, settings is too complex - fall back to the full page
+     */
+    renderSettings() {
+        // Settings has too many interactive elements - use the full page for now
+        this.close(false);
+        if (window.loadSettings) {
+            window.loadSettings();
+        }
+    },
+
+    /**
+     * Render wallet in panel
+     * For now, wallet is too complex - fall back to the modal
+     */
+    renderWallet() {
+        // Wallet has complex state management - use the modal for now
+        this.close(false);
+        // Call the original modal function directly, bypassing the right panel check
+        const modal = document.getElementById('walletModal');
+        if (modal) {
+            modal.style.display = 'flex';
+            document.body.style.overflow = 'hidden';
+            // Trigger wallet initialization
+            if (window.NostrState?.publicKey) {
+                import('/js/wallet-modal.js').then(module => {
+                    if (module.initWalletView) {
+                        module.initWalletView();
+                    }
+                });
+            }
+        }
+    },
+
+    /**
+     * Render compose in panel
+     */
+    renderCompose(replyTo = null) {
+        this.setTitle(replyTo ? 'Reply' : 'Create Note');
+
+        let section = this.content.querySelector('.right-panel-compose');
+        if (!section) {
+            section = document.createElement('div');
+            section.className = 'right-panel-section right-panel-compose';
+            this.content.appendChild(section);
+        }
+
+        section.classList.add('active');
+
+        if (this.defaultFeed) {
+            this.defaultFeed.style.display = 'none';
+        }
+
+        // Only show paywall option for new notes (not replies)
+        const paywallToggleHtml = !replyTo ? `
+            <div class="panel-paywall-toggle" style="margin-top: 12px; padding: 10px; background: var(--card-bg); border-radius: 8px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px;">
+                        <input type="checkbox" id="panelPaywallEnabled" onchange="RightPanel.togglePaywall(this.checked)">
+                        <span>🔒 Paywall this note</span>
+                    </label>
+                    <div id="panelPaywallPrice" style="display: none; align-items: center; gap: 4px;">
+                        <input type="number" id="panelPaywallPriceInput" placeholder="0.00015" step="0.00001" min="0.00001" value="0.00015" style="width: 80px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); font-size: 12px;">
+                        <span style="font-size: 12px; color: var(--text-secondary);">XMR</span>
+                    </div>
+                </div>
+                <div id="panelPaywallAddress" style="display: none; margin-top: 10px;">
+                    <label style="font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">Payment address:</label>
+                    <input type="text" id="panelPaywallAddressInput" placeholder="Your XMR address (4...)" style="width: 100%; padding: 8px; font-family: monospace; font-size: 11px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); box-sizing: border-box;">
+                </div>
+                <div id="panelPaywallPreview" style="display: none; margin-top: 10px;">
+                    <label style="font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px;">Preview text (visible to non-payers):</label>
+                    <textarea id="panelPaywallPreviewText" placeholder="Leave empty to auto-generate from first paragraph..." rows="3" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); font-size: 13px; resize: vertical; box-sizing: border-box;"></textarea>
+                </div>
+            </div>
+        ` : '';
+
+        section.innerHTML = `
+            ${replyTo ? `<div class="reply-context" style="padding: 12px; background: var(--card-bg); border-radius: 8px; margin-bottom: 12px; font-size: 14px; color: var(--text-secondary);">
+                Replying to: <span id="replyToPreview">Loading...</span>
+            </div>` : ''}
+            <textarea class="compose-textarea" id="panelComposeText" placeholder="${replyTo ? 'Write your reply...' : 'What\'s happening?'}" maxlength="4000"></textarea>
+            <div id="panelMediaPreview" class="media-preview" style="display: none;"></div>
+            <div class="nd-tor-media-note">ANONYMOUS MODE — media you attach won't be viewable outside Nosdag: public gateways can't reach a Tor-only node. Switch to clearnet to publish media for other Nostr clients.</div>
+            <div id="panelComposePreview" class="compose-preview" style="display: none;"></div>
+            <div class="compose-toolbar">
+                <button type="button" data-format="bold" title="Bold (Ctrl+B)"><strong>B</strong></button>
+                <button type="button" data-format="italic" title="Italic (Ctrl+I)"><em>I</em></button>
+                <button type="button" data-format="link" title="Link (Ctrl+K)">🔗</button>
+                <button type="button" data-format="mention" title="Mention (paste npub)">@</button>
+                <button type="button" data-format="code" title="Code">&lt;/&gt;</button>
+                <button type="button" data-format="quote" title="Quote">"</button>
+                <button type="button" data-format="list" title="Bullet list">•</button>
+                <button type="button" data-format="emoji" title="Add emoji">😀</button>
+                <button type="button" data-format="preview" title="Preview" class="preview-btn">Preview</button>
+            </div>
+            <div id="panelEmojiPicker" class="emoji-picker" style="display: none;">
+                <div class="emoji-grid">😀😃😄😁😅😂🤣😊😇🙂😉😌😍🥰😘😗😋😛😜🤪😎🤩🥳😏😒😔😟😕🙁😣😢😭😤😠😡🤬😱😨😰🤔🤫🤭🤥😶😐😑🙄😬😮😲🥱😴🤤😷🤒🤕🤢🤮🤧🥵🥶🥴😵🤯🤠🥳🥸😎🤓🧐😈👿👋🤚✋🖐️👌🤌✌️🤞🤟🤘🤙👈👉👆👇☝️👍👎✊👊🤛🤜👏🙌👐🤝🙏💪🦾❤️🧡💛💚💙💜🖤🤍🤎💔❣️💕💞💓💗💖💘💝✨⭐🌟💫🔥💥💢💦💨🎉🎊🎁🏆🥇🥈🥉</div>
+            </div>
+            <div style="text-align: right; color: var(--text-muted); font-size: 12px; margin-top: 4px;">
+                <span id="panelCharCount">0/4000</span>
+            </div>
+            ${paywallToggleHtml}
+            <div class="compose-actions" style="margin-top: 12px; display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <button class="media-btn" onclick="document.getElementById('panelMediaInput').click()">📎 Media</button>
+                    <input type="file" id="panelMediaInput" accept="image/*,video/*,.mov" multiple style="display: none;">
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button class="cancel-btn" onclick="RightPanel.close()">Cancel</button>
+                    <button class="send-btn" onclick="RightPanel.submitCompose(${replyTo ? `'${replyTo}'` : 'null'})">${replyTo ? 'Reply' : 'Publish'}</button>
+                </div>
+            </div>
+        `;
+
+        // Setup character count
+        const textarea = section.querySelector('#panelComposeText');
+        const charCount = section.querySelector('#panelCharCount');
+        textarea?.addEventListener('input', () => {
+            charCount.textContent = `${textarea.value.length}/4000`;
+        });
+
+        // Focus textarea
+        textarea?.focus();
+
+        // Setup media input handler
+        const mediaInput = section.querySelector('#panelMediaInput');
+        mediaInput?.addEventListener('change', (e) => {
+            this.handlePanelMediaUpload(e.target);
+        });
+
+        // Load reply context if replying
+        if (replyTo) {
+            this.loadReplyContext(replyTo);
+        }
+    },
+
+    // Media attached to the panel composer — up to 10 per note, published stacked in
+    // selection order. Each pick APPENDS so files can be added across several picks.
+    currentPanelMedia: [],
+    maxPanelMedia: 10,
+
+    /**
+     * Handle media file selection in panel compose (the input is `multiple`)
+     */
+    handlePanelMediaUpload(input) {
+        const files = Array.from(input.files || []);
+        input.value = ''; // let the same file be re-picked after a remove
+        if (!files.length) return;
+
+        for (const file of files) {
+            // .mov files can surface with no MIME type on some platforms — accept by name
+            const isMovByName = /\.mov$/i.test(file.name || '');
+            if (!file.type.startsWith('image/') && !file.type.startsWith('video/') && !isMovByName) {
+                window.NostrUtils?.showNotification?.(`${file.name}: not an image or video — skipped`, 'error');
+                continue;
+            }
+            // 50MB max for nostr.build
+            if (file.size > 50 * 1024 * 1024) {
+                window.NostrUtils?.showNotification?.(`${file.name}: larger than 50MB — skipped`, 'error');
+                continue;
+            }
+            if (this.currentPanelMedia.length >= this.maxPanelMedia) {
+                window.NostrUtils?.showNotification?.(`Up to ${this.maxPanelMedia} media files per note — the rest were skipped`, 'error');
+                break;
+            }
+            this.currentPanelMedia.push(file);
+        }
+
+        this.showPanelMediaPreview();
+    },
+
+    /**
+     * Show the attachment list in panel compose — one row + thumbnail per file, each with
+     * its own remove button.
+     */
+    showPanelMediaPreview() {
+        const preview = document.getElementById('panelMediaPreview');
+        if (!preview) return;
+
+        if (!this.currentPanelMedia.length) {
+            preview.style.display = 'none';
+            preview.innerHTML = '';
+            return;
+        }
+
+        const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+            ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        preview.innerHTML = this.currentPanelMedia.map((file, i) => {
+            const fileSize = (file.size / 1024 / 1024).toFixed(2) + ' MB';
+            const fileType = file.type.startsWith('image/') ? '🖼️' : '🎥';
+            return `
+            <div class="media-info" style="display: flex; justify-content: space-between; align-items: center; padding: 8px; background: var(--card-bg); border-radius: 6px; margin-bottom: 8px;">
+                <span style="font-size: 13px;">${fileType} ${esc(file.name)} (${fileSize})</span>
+                <button class="remove-media" data-index="${i}" style="background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 16px;" title="Remove media">✕</button>
+            </div>
+            <div id="panelMediaContent${i}" style="max-height: 200px; overflow: hidden; border-radius: 8px; margin-bottom: 8px;"></div>`;
+        }).join('');
+
+        // Per-item remove handlers
+        preview.querySelectorAll('.remove-media').forEach((btn) => {
+            btn.addEventListener('click', () => this.removePanelMedia(parseInt(btn.dataset.index, 10)));
+        });
+
+        // Thumbnails
+        this.currentPanelMedia.forEach((file, i) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const content = document.getElementById(`panelMediaContent${i}`);
+                if (!content) return;
+                if (file.type.startsWith('image/')) {
+                    content.innerHTML = `<img src="${e.target.result}" alt="Preview" style="width: 100%; height: auto; display: block;">`;
+                } else { // everything past the gate that isn't an image is video (incl. no-MIME .mov)
+                    content.innerHTML = `<video controls style="width: 100%; max-height: 200px;"><source src="${e.target.result}" type="${file.type || 'video/quicktime'}"></video>`;
+                }
+            };
+            reader.readAsDataURL(file);
+        });
+
+        preview.style.display = 'block';
+    },
+
+    /**
+     * Remove one attachment by index, or all of them when no index is given
+     */
+    removePanelMedia(index) {
+        if (typeof index === 'number') this.currentPanelMedia.splice(index, 1);
+        else this.currentPanelMedia = [];
+
+        const input = document.getElementById('panelMediaInput');
+        if (input) input.value = '';
+        this.showPanelMediaPreview();
+    },
+
+    /**
+     * Upload media to nostr.build with NIP-98 auth
+     */
+    // Media upload providers - tried in order with fallback
+    mediaProviders: [
+        {
+            name: 'nostr.build',
+            url: 'https://nostr.build/api/v2/upload/files',
+            upload: async function(file) {
+                // Create NIP-98 auth event
+                const authEvent = {
+                    kind: 27235,
+                    created_at: Math.floor(Date.now() / 1000),
+                    tags: [
+                        ['u', 'https://nostr.build/api/v2/upload/files'],
+                        ['method', 'POST']
+                    ],
+                    content: ''
+                };
+
+                const signedAuth = await window.NostrUtils?.signEvent?.(authEvent);
+                if (!signedAuth) throw new Error('Failed to sign auth event');
+
+                const authHeader = 'Nostr ' + btoa(JSON.stringify(signedAuth));
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const response = await fetch('https://nostr.build/api/v2/upload/files', {
+                    method: 'POST',
+                    headers: { 'Authorization': authHeader },
+                    body: formData
+                });
+
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const result = await response.json();
+
+                // Extract URL from response
+                if (result.data?.[0]?.url) return result.data[0].url;
+                if (result.url) return result.url;
+                throw new Error('No URL in response');
+            }
+        },
+        {
+            name: 'nostrcheck.me',
+            url: 'https://nostrcheck.me/api/v2/media',
+            upload: async function(file) {
+                // Create NIP-98 auth event for nostrcheck
+                const authEvent = {
+                    kind: 27235,
+                    created_at: Math.floor(Date.now() / 1000),
+                    tags: [
+                        ['u', 'https://nostrcheck.me/api/v2/media'],
+                        ['method', 'POST']
+                    ],
+                    content: ''
+                };
+
+                const signedAuth = await window.NostrUtils?.signEvent?.(authEvent);
+                if (!signedAuth) throw new Error('Failed to sign auth event');
+
+                const authHeader = 'Nostr ' + btoa(JSON.stringify(signedAuth));
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const response = await fetch('https://nostrcheck.me/api/v2/media', {
+                    method: 'POST',
+                    headers: { 'Authorization': authHeader },
+                    body: formData
+                });
+
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const result = await response.json();
+
+                // NIP-96 response format
+                if (result.nip94_event?.tags) {
+                    const urlTag = result.nip94_event.tags.find(t => t[0] === 'url');
+                    if (urlTag?.[1]) return urlTag[1];
+                }
+                if (result.url) return result.url;
+                throw new Error('No URL in response');
+            }
+        },
+        {
+            name: 'void.cat',
+            url: 'https://void.cat/upload',
+            upload: async function(file) {
+                // void.cat uses custom headers instead of NIP-98
+                // Calculate SHA256 hash of file
+                const arrayBuffer = await file.arrayBuffer();
+                const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+                const hashArray = Array.from(new Uint8Array(hashBuffer));
+                const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+                const response = await fetch('https://void.cat/upload', {
+                    method: 'POST',
+                    headers: {
+                        'V-Content-Type': file.type,
+                        'V-Full-Digest': hashHex,
+                        'V-Filename': file.name
+                    },
+                    body: file
+                });
+
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const result = await response.json();
+
+                // void.cat response format
+                if (result.file?.url) return result.file.url;
+                if (result.url) return result.url;
+                if (result.id) return `https://void.cat/d/${result.id}`;
+                throw new Error('No URL in response');
+            }
+        }
+    ],
+
+    /**
+     * Upload every attachment in order → array of refs. Throws on the first failure so a
+     * note carries ALL its media or doesn't publish.
+     */
+    async uploadPanelMedia() {
+        if (!this.currentPanelMedia.length) return null;
+
+        // Nosdag: shell = IPFS-or-fail (the user's own local node only); NO silent HTTP fallback.
+        // See posts.js uploadMediaToBlossom for the rationale. A not-ready node throws a clear
+        // message and blocks the post rather than quietly shipping media to a centralized host.
+        const Media = await import('./nosdag/media.js');
+        if (Media.inNosdagShell()) {
+            const refs = [];
+            for (const file of this.currentPanelMedia) {
+                const ref = await Media.addFileToIpfs(file);
+                console.log('[nosdag] 📦 panel media in IPFS:', ref);
+                refs.push(ref);
+            }
+            return refs;
+        }
+
+        const urls = [];
+        for (const original of this.currentPanelMedia) {
+            const file = await (window.NostrUtils?.stripImageMetadata?.(original) ?? original);
+            console.log('Uploading media:', file.name, file.size, file.type, '(metadata stripped:', file !== original, ')');
+
+            const errors = [];
+            let uploaded = null;
+            for (const provider of this.mediaProviders) {
+                try {
+                    console.log(`Trying ${provider.name}...`);
+                    uploaded = await provider.upload(file);
+                    console.log(`Success with ${provider.name}:`, uploaded);
+                    break;
+                } catch (error) {
+                    console.warn(`${provider.name} failed:`, error.message);
+                    errors.push(`${provider.name}: ${error.message}`);
+                }
+            }
+            if (!uploaded) throw new Error(`${original.name}: all upload providers failed: ` + errors.join('; '));
+            urls.push(uploaded);
+        }
+        return urls;
+    },
+
+    /**
+     * Toggle paywall options visibility in panel compose
+     */
+    async togglePaywall(enabled) {
+        const priceDiv = document.getElementById('panelPaywallPrice');
+        const previewDiv = document.getElementById('panelPaywallPreview');
+        const addressDiv = document.getElementById('panelPaywallAddress');
+        const addressInput = document.getElementById('panelPaywallAddressInput');
+        const checkbox = document.getElementById('panelPaywallEnabled');
+
+        if (!enabled) {
+            if (priceDiv) priceDiv.style.display = 'none';
+            if (previewDiv) previewDiv.style.display = 'none';
+            if (addressDiv) addressDiv.style.display = 'none';
+            return;
+        }
+
+        // Show UI immediately
+        if (priceDiv) priceDiv.style.display = 'flex';
+        if (previewDiv) previewDiv.style.display = 'block';
+        if (addressDiv) addressDiv.style.display = 'block';
+
+        // Try to find and pre-fill address
+        let address = null;
+
+        // Check localStorage first
+        const storedAddress = localStorage.getItem('user-monero-address');
+        if (storedAddress?.startsWith('4')) {
+            address = storedAddress;
+        }
+
+        // Check wallet address
+        if (!address) {
+            try {
+                const MoneroClient = await import('./wallet/monero-client.js');
+                const walletAddress = await MoneroClient.getPrimaryAddress();
+                if (walletAddress?.startsWith('4')) {
+                    address = walletAddress;
+                    localStorage.setItem('user-monero-address', walletAddress);
+                }
+            } catch (e) {
+                // Wallet not available
+            }
+        }
+
+        // Pre-fill input if address found
+        if (address && addressInput) {
+            addressInput.value = address;
+        }
+    },
+
+    /**
+     * Render reply (alias for compose with reply context)
+     */
+    renderReply(noteId) {
+        this.renderCompose(noteId);
+    },
+
+    /**
+     * Load reply context (the note being replied to)
+     */
+    async loadReplyContext(noteId) {
+        const preview = document.getElementById('replyToPreview');
+        if (!preview) return;
+
+        try {
+            const pool = window.NostrState?.pool;
+            const relays = window.NostrRelays?.getReadRelays?.() || window.NostrRelays?.getActiveRelays?.();
+
+            if (pool && relays?.length) {
+                const events = await pool.querySync(relays, {
+                    ids: [noteId]
+                });
+
+                if (events && events.length > 0) {
+                    const note = events[0];
+                    preview.textContent = note.content.substring(0, 100) + (note.content.length > 100 ? '...' : '');
+                } else {
+                    preview.textContent = 'Note not found';
+                }
+            }
+        } catch (error) {
+            preview.textContent = 'Failed to load context';
+        }
+    },
+
+    /**
+     * Submit compose/reply from panel
+     */
+    async submitCompose(replyToId = null) {
+        const textarea = document.getElementById('panelComposeText');
+        if (!textarea || (!textarea.value.trim() && !this.currentPanelMedia.length)) {
+            window.NostrUtils?.showNotification?.('Please enter some text or add media', 'error');
+            return;
+        }
+
+        let content = textarea.value.trim();
+
+        try {
+            // Upload media if present
+            if (this.currentPanelMedia.length) {
+                window.NostrUtils?.showNotification?.('Uploading media...', 'info');
+                const mediaUrls = await this.uploadPanelMedia();
+                if (mediaUrls?.length) {
+                    // Append each media ref on its own paragraph so the feed renders them stacked
+                    const block = mediaUrls.join('\n\n');
+                    content = content ? content + '\n\n' + block : block;
+                }
+            }
+
+            // Check if paywall is enabled (only for new posts, not replies)
+            const paywallCheckbox = document.getElementById('panelPaywallEnabled');
+            const isPaywalled = !replyToId && paywallCheckbox?.checked;
+
+            if (isPaywalled) {
+                // Handle paywalled post
+                await this.submitPaywalledPost(content);
+            } else if (replyToId && window.sendReplyDirect) {
+                await window.sendReplyDirect(replyToId, content);
+            } else if (window.sendPostDirect) {
+                await window.sendPostDirect(content);
+            } else {
+                throw new Error('Post function not available');
+            }
+
+            // Clear media state
+            this.currentPanelMedia = [];
+
+            this.close();
+        } catch (error) {
+            console.error('Error submitting:', error);
+            window.NostrUtils?.showNotification?.('Failed to post: ' + error.message, 'error');
+        }
+    },
+
+    /**
+     * Submit a paywalled post from the panel
+     */
+    async submitPaywalledPost(content) {
+        const priceInput = document.getElementById('panelPaywallPriceInput');
+        const previewInput = document.getElementById('panelPaywallPreviewText');
+        const addressInput = document.getElementById('panelPaywallAddressInput');
+
+        const priceXmr = parseFloat(priceInput?.value) || 0.00015;
+        const customPreview = previewInput?.value?.trim() || null;
+        let paymentAddress = addressInput?.value?.trim();
+
+        // If no manual address and per-note subaddress enabled, generate one
+        if (!paymentAddress && window.NostrState?.subaddressSettings?.perNote && window.Wallet?.isWalletUnlocked?.()) {
+            try {
+                const { address, index } = await window.Wallet.getNextSubaddress();
+                paymentAddress = address;
+                console.log(`[RightPanel] Paywall using subaddress #${index}: ${address.slice(0, 10)}...`);
+            } catch (e) {
+                console.warn('[RightPanel] Could not generate subaddress for paywall:', e);
+                paymentAddress = window.NostrState?.userMoneroAddress;
+            }
+        } else if (!paymentAddress) {
+            paymentAddress = window.NostrState?.userMoneroAddress;
+        }
+
+        // Accept both primary addresses (4...) and subaddresses (8...)
+        if (!paymentAddress?.match(/^[48]/)) {
+            window.NostrUtils?.showNotification?.('Please enter a valid Monero address', 'error');
+            throw new Error('No Monero address set');
+        }
+
+        // Save address for future use
+        localStorage.setItem('user-monero-address', paymentAddress);
+
+        if (!window.NostrPaywall?.createPaywalledContent) {
+            throw new Error('Paywall module not available');
+        }
+
+        // Create encrypted content
+        const paywallData = await window.NostrPaywall.createPaywalledContent({
+            content: content,
+            preview: customPreview,
+            priceXmr: priceXmr,
+            paymentAddress: paymentAddress
+        });
+
+        // Create event with paywall tags
+        const event = {
+            kind: 1,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [
+                ['client', 'nosdag'],
+                ['monero_address', paymentAddress]
+            ],
+            content: paywallData.publicContent
+        };
+
+        // Add paywall tags
+        const paywallTags = window.NostrPaywall.createPaywallTags({
+            priceXmr: paywallData.priceXmr,
+            paymentAddress: paywallData.paymentAddress,
+            preview: paywallData.preview,
+            encryptedContent: paywallData.encryptedContent
+        });
+        event.tags.push(...paywallTags);
+
+        // Sign the event
+        window.NostrUtils?.addMentionTags?.(event, event.content);
+        const signedEvent = await window.NostrUtils?.signEvent?.(event);
+        if (!signedEvent) {
+            throw new Error('Failed to sign event');
+        }
+
+        // Register paywall with backend
+        await window.NostrPaywall.registerPaywall({
+            noteId: signedEvent.id,
+            encryptedContent: paywallData.encryptedContent,
+            decryptionKey: paywallData.decryptionKey,
+            preview: paywallData.preview,
+            priceXmr: paywallData.priceXmr,
+            paymentAddress: paywallData.paymentAddress
+        });
+
+        // Publish to relays
+        const relays = window.NostrRelays?.getWriteRelays?.() || [];
+        await window.NostrState?.pool?.publish(relays, signedEvent);
+
+        window.NostrUtils?.showNotification?.('Paywalled note published!', 'success');
+        window.NostrUI?.showSuccessToast?.('Paywalled note published!');
+
+        // Refresh feed
+        setTimeout(() => window.loadFeedRealtime?.(), TIMEOUTS.FEED_REFRESH_DELAY);
+    },
+
+    /**
+     * Render zap/tip flow in panel
+     */
+    renderZap(data) {
+        this.setTitle('Tip with Monero');
+
+        let section = this.content.querySelector('.right-panel-zap');
+        if (!section) {
+            section = document.createElement('div');
+            section.className = 'right-panel-section right-panel-zap';
+            this.content.appendChild(section);
+        }
+
+        section.classList.add('active');
+
+        if (this.defaultFeed) {
+            this.defaultFeed.style.display = 'none';
+        }
+
+        // data should contain { address, noteId, authorName, authorPubkey }
+        const address = data?.address || '';
+        if (!address) {
+            section.innerHTML = '<div style="padding: 20px;">No Monero address available for this user</div>';
+            return;
+        }
+
+        // Validate Monero address format (primary: 95 chars starting with 4, subaddress: 95 chars starting with 8)
+        const isValidAddress = /^[48][1-9A-HJ-NP-Za-km-z]{94}$/.test(address);
+        if (!isValidAddress) {
+            section.innerHTML = '<div style="padding: 20px;">Invalid Monero address format</div>';
+            return;
+        }
+
+        // Escape user-controlled data for safe HTML rendering
+        const safeAuthorName = this.escapeHtml(data.authorName || 'this user');
+
+        section.innerHTML = `
+            <div style="margin-bottom: 16px;">
+                <div style="color: var(--text-secondary); font-size: 14px; margin-bottom: 8px;">
+                    Tipping ${safeAuthorName}
+                </div>
+                <div style="font-family: monospace; font-size: 12px; word-break: break-all; padding: 12px; background: var(--card-bg); border-radius: 8px; color: var(--text-primary);">
+                    ${address}
+                </div>
+            </div>
+            <div class="qr-container" id="panelQrCode" style="margin: 20px auto;"></div>
+            <div style="margin-top: 16px;">
+                <button class="send-btn panel-zap-copy-btn" style="width: 100%;">
+                    📋 Copy Address
+                </button>
+            </div>
+            <div style="margin-top: 12px; text-align: center; color: var(--text-muted); font-size: 12px;">
+                Scan with your Monero wallet
+            </div>
+        `;
+
+        // Add event listener instead of inline onclick (XSS prevention)
+        section.querySelector('.panel-zap-copy-btn')?.addEventListener('click', () => {
+            navigator.clipboard.writeText(address);
+            window.showToast?.('Address copied!', 'success');
+        });
+
+        // Generate QR code
+        if (window.QRCode) {
+            const qrContainer = section.querySelector('#panelQrCode');
+            new QRCode(qrContainer, {
+                text: `monero:${address}`,
+                width: 200,
+                height: 200,
+                colorDark: 'var(--nd-accent)',
+                colorLight: '#000000'
+            });
+        }
+    },
+
+    /**
+     * Set panel title
+     */
+    setTitle(title) {
+        if (this.title) {
+            this.title.textContent = title;
+        }
+    },
+
+    /**
+     * Fallback to modal/page when panel not visible (mobile)
+     */
+    fallbackToModal(view, data) {
+        switch (view) {
+            case 'thread':
+                if (window.openThreadModal) {
+                    window.openThreadModal(data);
+                } else if (window.viewThread) {
+                    window.viewThread(data);
+                }
+                break;
+            case 'profile':
+                if (window.openProfileModal) {
+                    window.openProfileModal(data);
+                } else if (window.viewProfile) {
+                    window.viewProfile(data);
+                }
+                break;
+            case 'settings':
+                if (window.handleNavItemClick) {
+                    window.handleNavItemClick('settings');
+                }
+                break;
+            case 'wallet':
+                if (window.openWalletModal) {
+                    window.openWalletModal();
+                }
+                break;
+            case 'compose':
+                if (window.toggleCompose) {
+                    window.toggleCompose();
+                }
+                break;
+            case 'reply':
+                if (window.openReplyModal) {
+                    window.openReplyModal(data);
+                }
+                break;
+            case 'zap':
+                if (window.openZapModal) {
+                    window.openZapModal(data);
+                }
+                break;
+        }
+    },
+
+    /**
+     * Escape HTML for safe rendering
+     * TODO: This duplicates escapeHtml from utils.js - consider importing shared utility
+     */
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+};
+
+// Global functions for onclick
+window.closeRightPanel = () => RightPanel.close();
+window.rightPanelGoBack = () => RightPanel.goBack();
+
+// NIP-23 article reader dispatch. articles.js openArticleByCoord calls this
+// after resolving a card click; hash routing in app.js calls it for naddr URLs.
+// On mobile (right panel not visible) RightPanel.openArticle falls back to
+// fallbackToModal, which is patched separately for the mobile build.
+window.openArticleReader = (eventOrCoord) => RightPanel.openArticle(eventOrCoord);
+
+// PDF reader dispatch. pdf-reader.js initPdfReader() document-level click
+// listener calls this when any [data-action="open-pdf"] is clicked.
+window.openPdfReader = (arg) => RightPanel.openPdf(arg);
+
+// NIP-23 article composer entry. Wired to the hamburger menu "Write Article"
+// item and any future header / floating-action entry points.
+window.openArticleEditor = async ({ draftEvent = null } = {}) => {
+    const Editor = await import('./articles-editor.js');
+    Editor.openComposer({ draftEvent });
+};
+
+// Bootstrap PDF auto-hydration once at module load — sets up the
+// MutationObserver that finds .pdf-card elements as they're inserted into
+// the DOM and renders their first-page thumbnails.
+import('./pdf-reader.js').then(mod => {
+    try { mod.initPdfReader(); } catch (e) { console.warn('initPdfReader failed:', e); }
+}).catch(e => console.warn('pdf-reader.js failed to load:', e));
+
+// Media viewer: capture-phase click handler so an image click focuses the image
+// instead of falling through to the note's thread-open handler.
+import('./ui/media-viewer.js').then(mod => {
+    try { mod.initMediaViewer(); } catch (e) { console.warn('initMediaViewer failed:', e); }
+}).catch(e => console.warn('media-viewer.js failed to load:', e));
+
+// Export for module usage
+window.RightPanel = RightPanel;
+
+export default RightPanel;

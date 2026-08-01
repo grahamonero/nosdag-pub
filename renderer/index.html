@@ -1,0 +1,1446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- H10: Content-Security-Policy. Defense-in-depth behind DOMPurify so one XSS sink can't pull in an
+         external attacker script. NO off-origin script sources: nostr-tools + the noble crypto that NIP-49
+         key derivation uses are bundled locally under /lib. script-src keeps
+         'unsafe-inline' (inline handlers throughout) and 'unsafe-eval': the Monero wallet + pdf.js bundles
+         run `new Function("return this")()` global detection at load, which 'wasm-unsafe-eval' alone would
+         break. connect-src stays open to https:/wss:/ws: because relays and NIP-05 verification are
+         user-supplied endpoints at arbitrary domains (open-ended by protocol — it can't be a fixed
+         allowlist); object/base-uri/form-action are locked down. A <meta> CSP (not a header) so it governs
+         the document but leaves the Monero worker's own context free to run WASM. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http://127.0.0.1:*; media-src 'self' data: blob: https: http://127.0.0.1:*; connect-src 'self' https: wss: ws: http://127.0.0.1:*; worker-src 'self' blob:; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'">
+    <!-- Disable Chromium's speculative DNS prefetcher. Real connections tunnel DNS through the Tor
+         SOCKS proxy (verified: socks5 sends hostnames to the proxy, not the local resolver), but the
+         prefetcher can resolve link hostnames LOCALLY, bypassing the proxy — a Tor-mode DNS leak. No
+         downside in clearnet (only loses a speculative optimization). -->
+    <meta http-equiv="x-dns-prefetch-control" content="off">
+    <title>Nosdag</title>
+    <script src="/lib/qrcode.min.js"></script>
+    <!-- HLS.js for livestream video playback — bundled locally (M8: no CDN fetch / boot beacon /
+         supply-chain risk). renderer/lib/hls.min.js is hls.js@1.4.14, SHA-384-verified against the
+         former jsDelivr SRI. -->
+    <script src="/lib/hls.min.js"></script>
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/css/nosdag-fonts.css">
+    <link rel="stylesheet" href="/css/nosdag-theme.css">
+    <link rel="stylesheet" href="/css/livestream.css">
+
+</head>
+<body>
+    <!-- ==================================
+         NEW MINIMAL HEADER (nav lives in the left rail, #ndRail)
+         ================================== -->
+
+    <!-- Hamburger menu removed — primary navigation now lives in the left rail (#ndRail). -->
+
+    <!-- Minimal Fixed Header - Single Row Layout -->
+    <header class="minimal-header">
+        <div class="header-single-row">
+            <div class="logo-container">
+                <img src="/assets/nosdag-icon.png" alt="Nosdag" class="header-logo" style="height: 30px; width: auto; border-radius: 7px;">
+                <span class="tagline" style="font-weight:700; font-size:17px; letter-spacing:.3px; background:linear-gradient(90deg,#ffffff 35%,var(--nd-accent)); -webkit-background-clip:text; background-clip:text; color:transparent;">Nosdag</span>
+            </div>
+
+            <div id="ndNetChip" data-s="boot">node booting…</div>
+
+            <!-- Auth buttons - separate from feed-selector so they show on mobile -->
+            <div class="header-auth-buttons">
+                <button class="create-note-btn" id="headerCreateNoteBtn" onclick="handleCreateNoteClick()" style="display: none;">
+                    ✏️ <span>Post</span>
+                </button>
+                <button class="notifications-btn" id="headerNotificationsBtn" onclick="handleNavItemClick('notifications')" style="display: none; position: relative;">
+                    🔔
+                    <span id="notificationBadge" style="position: absolute; top: -4px; right: -4px; background: var(--nd-accent); color: white; border-radius: 10px; min-width: 18px; height: 18px; padding: 0 5px; font-size: 11px; font-weight: bold; display: none; justify-content: center; align-items: center;"></span>
+                </button>
+                <button class="create-account-btn" id="headerCreateAccountBtn" onclick="showCreateAccountModal()">
+                    Create Account
+                </button>
+                <button class="login-btn-orange" id="headerLoginBtn" onclick="showLoginModalWithLogin()">
+                    Log In
+                </button>
+            </div>
+
+            <div class="quick-actions">
+                <div class="relay-indicator" id="relayIndicator">
+                    <div class="status-dot"></div>
+                    <span id="relayCount">0 relays connected</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- ==================================
+         END NEW HEADER & MENU
+         ================================== -->
+
+    <!-- App Container for Three-Column Layout -->
+    <div class="app-container">
+
+    <!-- Nosdag left rail — primary navigation (replaces the top feed-tabs + the old hamburger) -->
+    <aside class="nd-rail" id="ndRail">
+        <div class="nd-nav on" data-nd-home onclick="ndFeedTab('following')"><span class="i">▸</span> Following</div>
+        <div class="nd-nav" onclick="window.NosdagPending && window.NosdagPending.show()"><span class="i">⚑</span> Requests<span class="nd-nav-badge" id="ndRequestsCount" style="display:none;">0</span></div>
+        <div class="nd-nav" onclick="handleNavItemClick('messages')"><span class="i">✉</span> Messages</div>
+        <div class="nd-nav" data-feed="articles" onclick="handleFeedTabClick('articles', null)"><span class="i">✎</span> Articles</div>
+        <div class="nd-nav" onclick="handleNavItemClick('bookmarks')"><span class="i">★</span> Bookmarks</div>
+        <div class="nd-nav" onclick="handleNavItemClick('profile')"><span class="i">◐</span> Profile</div>
+        <div class="nd-rail-rule"></div>
+        <div class="nd-nav" onclick="openWalletModal()"><span class="i">💰</span> Tip Jar</div>
+        <div class="nd-nav" onclick="handleNavItemClick('node')"><span class="i">🛰</span> My Node</div>
+        <div class="nd-nav" onclick="handleNavItemClick('anon')"><span class="i">🧅</span> Anonymous Mode</div>
+        <div class="nd-rail-rule"></div>
+        <div class="nd-nav" onclick="handleNavItemClick('search')"><span class="i">⌕</span> Search</div>
+        <div class="nd-nav" onclick="handleNavItemClick('settings')"><span class="i">⚙</span> Settings</div>
+        <div class="nd-nav" id="ndThemeToggle" onclick="ndToggleTheme(event)"><span class="i" id="ndThemeIcon">☀</span> <span id="ndThemeLabel">Light mode</span></div>
+        <div class="nd-nav" id="ndLogout" onclick="logout()" style="display:none;"><span class="i">⏻</span> Logout</div>
+    </aside>
+    <script>
+      (function(){var r=document.getElementById('ndRail');if(!r)return;
+        r.addEventListener('click',function(e){var n=e.target.closest('.nd-nav');if(!n)return;
+          r.querySelectorAll('.nd-nav').forEach(function(x){x.classList.remove('on')});n.classList.add('on');});
+        // Rail "Following" routes through the feed tab so the tab's active state stays truthful;
+        // any feed-tab click (user or popstate replay) highlights the Following rail row.
+        window.ndFeedTab=function(key){
+          var t=document.querySelector('.feed-selector .feed-tab[data-feed="'+key+'"]');
+          if(t) t.click(); else if(window.handleFeedTabClick) window.handleFeedTabClick(key,null);
+        };
+        document.addEventListener('click',function(e){
+          if(!e.target.closest || !e.target.closest('.feed-selector .feed-tab')) return;
+          r.querySelectorAll('.nd-nav').forEach(function(x){x.classList.remove('on')});
+          var f=r.querySelector('[data-nd-home]'); if(f) f.classList.add('on');
+        });
+        // The tab bar belongs to the feed surface only — mirror #feed's visibility so
+        // page loaders that hide the feed (My Node, profile, thread…) hide the tabs too.
+        window.addEventListener('DOMContentLoaded',function(){
+          var feedEl=document.getElementById('feed'), sel=document.querySelector('.feed-selector');
+          if(!feedEl||!sel) return;
+          new MutationObserver(function(){
+            sel.style.display = feedEl.style.display==='none' ? 'none' : '';
+          }).observe(feedEl,{attributes:true,attributeFilter:['style']});
+        });})();
+      // Theme: dark = The Ledger (default), light = The Press. Same data-theme attribute +
+      // localStorage key as js/ui/theme.js; applied here at boot so the choice survives a
+      // restart, toggled from the rail. The label names the mode you switch TO.
+      (function(){
+        function paint(cur){
+          var l=document.getElementById('ndThemeLabel'), i=document.getElementById('ndThemeIcon');
+          if(l) l.textContent = cur==='dark' ? 'Light mode' : 'Dark mode';
+          if(i) i.textContent = cur==='dark' ? '☀' : '☾';
+        }
+        var saved=null; try{ saved=localStorage.getItem('theme'); }catch(_){}
+        var cur = saved==='light' ? 'light' : 'dark';
+        if(cur==='light') document.documentElement.setAttribute('data-theme','light');
+        paint(cur);
+        window.ndToggleTheme=function(e){
+          if(e) e.stopPropagation(); // a toggle, not a page — don't steal the rail's active state
+          var now = document.documentElement.getAttribute('data-theme')==='light' ? 'dark' : 'light';
+          document.documentElement.setAttribute('data-theme', now);
+          try{ localStorage.setItem('theme', now); }catch(_){}
+          paint(now);
+        };
+      })();
+    </script>
+
+    <!-- LEGACY: Keep existing sidebar hidden for backward compatibility -->
+    <div class="sidebar" style="display: none;">
+        <div class="logo">
+            <img src="/assets/nosdag-lockup.png" alt="Nosdag" style="width: 210px; height: auto; border-radius: 10px;">
+        </div>
+        
+        <div class="nav-item active" data-tab="home" onclick="handleNavItemClick('home')">
+            <span>🏠</span>
+            <span>Home</span>
+        </div>
+        
+        <div class="nav-item" data-tab="settings" onclick="handleNavItemClick('settings')">
+            <span>⚙️</span>
+            <span>Settings</span>
+        </div>
+        
+        <div class="nav-item" data-tab="search" onclick="handleNavItemClick('search')">
+            <span>🔍</span>
+            <span>Search</span>
+        </div>
+        
+        <div class="nav-item" data-tab="messages" onclick="handleNavItemClick('messages')" style="position: relative;">
+            <span>✉️</span>
+            <span>Messages</span>
+            <span id="messagesBadge" style="position: absolute; top: 8px; right: 8px; background: var(--nd-accent); color: white; border-radius: 10px; min-width: 18px; height: 18px; padding: 0 5px; font-size: 11px; font-weight: bold; display: none; justify-content: center; align-items: center;"></span>
+        </div>
+
+        <div class="nav-item" data-tab="notifications" onclick="handleNavItemClick('notifications')" style="position: relative;">
+            <span>🔔</span>
+            <span>Notifications</span>
+            <span id="notificationBadge" style="position: absolute; top: 8px; right: 8px; background: var(--nd-accent); color: white; border-radius: 10px; min-width: 18px; height: 18px; padding: 0 5px; font-size: 11px; font-weight: bold; display: none; justify-content: center; align-items: center;"></span>
+        </div>
+        
+        <div class="nav-item" data-tab="profile" onclick="handleNavItemClick('profile')">
+            <span>👤</span>
+            <span>Profile</span>
+        </div>
+
+        <!-- Theme Toggle -->
+        <div class="nav-item" onclick="toggleTheme()" style="cursor: pointer;">
+            <span id="themeIcon">🌙</span>
+            <span id="themeLabel">Dark</span>
+        </div>
+
+        <!-- Login/Create Account Options (shown when not logged in) -->
+        <div id="authOptions" style="display: none; margin-top: 20px; padding-top: 20px; border-top: 1px solid #333;">
+            <button class="login-option-btn" onclick="showCreateAccount()" style="width: 100%; margin-bottom: 10px; padding: 10px; background: linear-gradient(135deg, var(--nd-accent), var(--nd-accent)); border: none; color: white; border-radius: 8px; cursor: pointer;">
+                🆕 Create Account
+            </button>
+            <button class="login-option-btn" onclick="showLoginWithNsec()" style="width: 100%; margin-bottom: 10px; padding: 10px; background: #333; border: none; color: white; border-radius: 8px; cursor: pointer;">
+                🔑 Login with nsec
+            </button>
+            <button class="login-option-btn" onclick="showLoginWithAmber()" style="width: 100%; margin-bottom: 10px; padding: 10px; background: #333; border: none; color: white; border-radius: 8px; cursor: pointer;">
+                📱 Use Amber (bunker)
+            </button>
+        </div>
+        
+        <!-- Logout Option (shown when logged in) -->
+        <div id="logoutOption" style="display: none; margin-top: 20px; padding-top: 20px; border-top: 1px solid #333;">
+            <button onclick="logout()" style="width: 100%; padding: 10px; background: #333; border: none; color: #ff6b6b; border-radius: 8px; cursor: pointer;">
+                🚪 Logout
+            </button>
+        </div>
+        
+        <button class="post-button" onclick="toggleCompose()">✏️ Create Note</button>
+
+        <button class="post-button" onclick="showZapQueue()" style="position: relative; margin-top: 10px;">
+            💰 XMR Queue
+            <span class="zap-queue-indicator" style="position: absolute; top: -5px; right: -5px; background: linear-gradient(135deg, var(--nd-accent), var(--nd-accent)); color: #000; border-radius: 50%; width: 20px; height: 20px; font-size: 12px; font-weight: bold; display: none; justify-content: center; align-items: center;">0</span>
+        </button>
+
+        <div class="nav-item" onclick="logout()" style="margin-top: 10px; background: linear-gradient(135deg, var(--nd-accent), var(--nd-accent)); border-radius: 12px; color: #fff;">
+            <span>🚪</span>
+            <span style="color: #fff; font-weight: bold;">Logout</span>
+        </div>
+    </div>
+
+    <div class="main">
+        <!-- Feed tabs: switch feeds within the home surface (rail "Following" lands here) -->
+        <nav class="feed-selector">
+            <a href="#" class="feed-tab active" data-feed="following" onclick="handleFeedTabClick('following', event)">Following</a>
+            <a href="#" class="feed-tab" data-feed="trending" onclick="handleFeedTabClick('trending', event)">Popular</a>
+            <a href="#" class="feed-tab" data-feed="monero" onclick="handleFeedTabClick('monero', event)">Trending Monero</a>
+            <a href="#" class="feed-tab" data-feed="live" onclick="handleFeedTabClick('live', event)">Live</a>
+        </nav>
+
+        <!-- Contact List Sync Status Indicator -->
+        <div id="contactSyncStatus" class="sync-status-banner" style="display: none; background: linear-gradient(135deg, var(--nd-accent), var(--nd-accent)); padding: 10px 16px; margin: 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1); color: #fff; font-size: 13px; align-items: center; gap: 10px;">
+            <div class="spinner" style="width: 14px; height: 14px; border: 2px solid rgba(255, 255, 255, 0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+            <span id="contactSyncText">Syncing your follows...</span>
+        </div>
+
+        <div id="compose" class="compose-area" style="display: none;">
+            <textarea class="compose-textarea" placeholder="What's happening?" maxlength="4000" style="min-height: 120px; resize: vertical;" oninput="updateCharacterCount(this, 'mainCharCount')"></textarea>
+            <div id="composePreview" class="compose-preview" style="display: none;"></div>
+            <div class="compose-toolbar">
+                <button type="button" data-format="bold" title="Bold (Ctrl+B)"><strong>B</strong></button>
+                <button type="button" data-format="italic" title="Italic (Ctrl+I)"><em>I</em></button>
+                <button type="button" data-format="link" title="Link (Ctrl+K)">🔗</button>
+                <button type="button" data-format="mention" title="Mention (paste npub)">@</button>
+                <button type="button" data-format="code" title="Code">&lt;/&gt;</button>
+                <button type="button" data-format="quote" title="Quote">"</button>
+                <button type="button" data-format="list" title="Bullet list">•</button>
+                <button type="button" data-format="emoji" title="Add emoji">😀</button>
+                <button type="button" data-format="preview" title="Preview" class="preview-btn">Preview</button>
+            </div>
+            <div id="mainEmojiPicker" class="emoji-picker" style="display: none;">
+                <div class="emoji-grid">😀😃😄😁😅😂🤣😊😇🙂😉😌😍🥰😘😗😋😛😜🤪😎🤩🥳😏😒😔😟😕🙁😣😢😭😤😠😡🤬😱😨😰🤔🤫🤭🤥😶😐😑🙄😬😮😲🥱😴🤤😷🤒🤕🤢🤮🤧🥵🥶🥴😵🤯🤠🥳🥸😎🤓🧐😈👿👋🤚✋🖐️👌🤌✌️🤞🤟🤘🤙👈👉👆👇☝️👍👎✊👊🤛🤜👏🙌👐🤝🙏💪🦾❤️🧡💛💚💙💜🖤🤍🤎💔❣️💕💞💓💗💖💘💝✨⭐🌟💫🔥💥💢💦💨🎉🎊🎁🏆🥇🥈🥉</div>
+            </div>
+            <div style="text-align: right; color: #666; font-size: 12px; margin-bottom: 8px;">
+                <span id="mainCharCount">0/4000</span>
+            </div>
+            <div class="compose-actions">
+                <input type="text" class="xmr-address-input" placeholder="Your Monero address (optional)" id="composeMoneroAddress">
+                <!-- Paywall Toggle -->
+                <div class="paywall-toggle-container">
+                    <div class="paywall-toggle-row">
+                        <div class="paywall-toggle">
+                            <input type="checkbox" id="paywallEnabled" onchange="NostrPaywall.togglePaywall(this.checked)">
+                            <label for="paywallEnabled">🔒 Paywall this post</label>
+                        </div>
+                        <div id="paywallPriceInput" class="paywall-price-input">
+                            <input type="number" id="paywallPrice" placeholder="0.00015" step="0.00001" min="0.00001" value="0.00015">
+                            <span>XMR</span>
+                        </div>
+                    </div>
+                    <div id="paywallPreviewSection" class="paywall-preview-section">
+                        <div class="paywall-preview-header" onclick="NostrPaywall.togglePreviewEdit()">
+                            <span>Preview text (shown to non-payers)</span>
+                            <span id="paywallPreviewToggle" class="paywall-preview-toggle">▼ Edit</span>
+                        </div>
+                        <div id="paywallPreviewSuggested" class="paywall-preview-suggested"></div>
+                        <div id="paywallPreviewEdit" class="paywall-preview-edit">
+                            <textarea id="paywallPreviewText" placeholder="Auto-generated from first paragraph..." rows="3"></textarea>
+                            <div class="paywall-preview-hint">Leave empty to auto-generate from your post's first paragraph</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="media-upload-section">
+                    <input type="file" id="composeMediaInput" accept="image/*,video/*,.mov" multiple style="display: none;" onchange="handleMediaUpload(this, 'compose')">
+                    <div id="composeMediaPreview" class="media-preview" style="display: none;"></div>
+                    <div class="nd-tor-media-note">ANONYMOUS MODE — media you attach won't be viewable outside Nosdag: public gateways can't reach a Tor-only node. Switch to clearnet to publish media for other Nostr clients.</div>
+                </div>
+                <div class="compose-buttons">
+                    <button class="media-btn" onclick="document.getElementById('composeMediaInput').click()" title="Add Image/Video">
+                        📎 Media
+                    </button>
+                    <button class="cancel-btn" onclick="cancelCompose()">Cancel</button>
+                    <button class="send-btn" onclick="sendPost()">Publish</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quick-toggle chip: only visible when Following feed is active -->
+        <div id="followingFeedChip" style="display: none; padding: 8px 16px; border-bottom: 1px solid #222; background: color-mix(in srgb, var(--nd-accent) 3%, transparent);">
+            <label style="display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #ccc; cursor: pointer;">
+                <input type="checkbox" id="followingChipShowOwn" checked onchange="toggleShowOwnNotesInFollowing(this.checked, true)" style="cursor: pointer;">
+                <span>Show my own notes in this feed</span>
+            </label>
+        </div>
+
+        <div class="feed" id="feed">
+            <!-- Welcome Banner for First-Time Anonymous Users -->
+            <div class="welcome-banner hidden" id="welcomeBanner">
+                <button class="close-banner" onclick="closeWelcomeBanner()">✕</button>
+                <h2 class="welcome-title">Welcome to Nosdag 👋</h2>
+                <p class="welcome-text">
+                    You are viewing the top notes regarding the Monero community. To post or send tips, just generate your keys - takes 5 seconds, no email needed.
+                </p>
+                <div class="welcome-actions">
+                    <button class="welcome-btn primary" onclick="handleCreateKeysAndPost()">Create Keys & Post</button>
+                    <a href="#" class="welcome-btn secondary" onclick="showWhatIsNostr()">What's Nostr?</a>
+                    <a href="#" class="welcome-btn secondary" onclick="showWhatIsMonero()">What's Monero?</a>
+                </div>
+            </div>
+
+            <div class="loading">Loading feed…</div>
+        </div>
+        
+        <!-- Messages page (hidden by default) -->
+        <div id="messagesPage" class="messages-page" style="display: none;">
+            <div class="messages-container">
+                <div class="conversations-list">
+                    <div class="conversations-header">
+                        <h2>Messages</h2>
+                        <button class="new-message-btn" onclick="startNewMessage()">
+                            <span>✉️ New</span>
+                        </button>
+                    </div>
+                    <div id="conversationsList" class="conversations">
+                        <!-- Conversations will be listed here -->
+                    </div>
+                </div>
+                <div class="message-thread">
+                    <div id="messageHeader" class="message-header">
+                        <span>Select a conversation</span>
+                    </div>
+                    <div id="messageThread" class="messages-display">
+                        <!-- Messages will appear here -->
+                    </div>
+                    <div id="messageComposer" class="message-composer" style="display: none;">
+                        <textarea id="messageInput" placeholder="Type your message..." rows="3"></textarea>
+                        <button onclick="sendMessage()" class="send-message-btn">Send</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Thread page (hidden by default) -->
+        <div id="threadPage" class="thread-page" style="display: none;">
+            <div class="thread-header">
+                <button onclick="goBackFromThread()" style="background: none; border: none; color: #fff; cursor: pointer; font-size: 18px; margin-right: 12px;">←</button>
+                <h2>Thread</h2>
+            </div>
+            <div id="threadPageContent" class="thread-content">
+                <!-- Thread will be displayed here -->
+            </div>
+        </div>
+
+        <div id="profilePage" class="profile-page" style="display: none;">
+            <!-- User profile will be displayed here -->
+        </div>
+
+        <!-- Nosdag Node page (hidden by default) -->
+        <div id="nodePage" class="node-page" style="display: none;"></div>
+
+        <!-- Nosdag Hosted Follows page (hidden by default) -->
+        <div id="hostedFollowsPage" class="node-page" style="display: none;"></div>
+
+        <!-- Nosdag Anonymous Mode page (Tor/clearnet switch + onion relays; hidden by default) -->
+        <div id="anonModePage" class="node-page" style="display: none;"></div>
+
+        <!-- Nosdag Media library page (your media CIDs: sizes, pin locations; hidden by default) -->
+        <div id="mediaLibraryPage" class="node-page" style="display: none;"></div>
+
+
+        <!-- Bookmarks page (hidden by default) -->
+        <div id="bookmarksPage" class="bookmarks-page" style="display: none;"></div>
+
+        <!-- Article composer (hidden by default) -->
+        <div id="composeArticlePage" class="compose-article-page" style="display: none;">
+            <div class="article-editor-header">
+                <button id="articleBackBtn" class="article-editor-back" aria-label="Back">←</button>
+                <h2 class="article-editor-title">Write article</h2>
+                <div class="article-editor-tabs">
+                    <button id="articleWriteTabBtn" class="article-tab article-tab--active" type="button">Write</button>
+                    <button id="articlePreviewTabBtn" class="article-tab" type="button">Preview</button>
+                </div>
+                <div class="article-editor-actions">
+                    <div class="article-drafts-menu-wrap">
+                        <button id="articleDraftsBtn" class="btn-secondary" type="button" aria-haspopup="true" aria-expanded="false">📁 Drafts</button>
+                        <div id="articleDraftsMenu" class="article-drafts-menu" style="display: none;">
+                            <button id="articleNewDraftBtn" class="article-drafts-menu-new" type="button">+ New draft</button>
+                            <div id="articleDraftsList" class="article-drafts-menu-list"></div>
+                        </div>
+                    </div>
+                    <button id="articleClearBtn" class="btn-secondary" type="button" title="Clear form">🗑️ Clear</button>
+                    <button id="articleSaveDraftBtn" class="btn-secondary" type="button">Save draft</button>
+                    <button id="articlePublishBtn" class="btn-primary" type="button">Publish</button>
+                </div>
+            </div>
+            <div id="articleEditorStatus" class="article-editor-status" aria-live="polite"></div>
+
+            <div id="articleEditorWrite" class="article-editor-write">
+                <div class="article-editor-cover">
+                    <div id="articleCoverPreview" class="article-cover-preview">
+                        <span class="article-cover-placeholder">Cover image</span>
+                    </div>
+                    <button id="articleCoverUploadBtn" class="btn-secondary" type="button">Upload cover</button>
+                </div>
+
+                <input id="articleTitle" class="article-title-input" type="text" placeholder="Title" maxlength="200" />
+                <input id="articleSummary" class="article-summary-input" type="text" placeholder="One-sentence summary (shown in feeds)" maxlength="300" />
+                <input id="articleTopics" class="article-topics-input" type="text" placeholder="Topics, space-separated (e.g. #monero #privacy)" />
+
+                <fieldset id="articlePaywallSection" class="article-paywall-section">
+                    <legend>
+                        <label class="article-paywall-toggle-label">
+                            <input id="articlePaywallToggle" type="checkbox" />
+                            🔒 Paywall this article
+                        </label>
+                    </legend>
+                    <div class="article-paywall-fields">
+                        <p class="article-paywall-hint">Insert the 🔒 break in your body (toolbar button) to mark where locked content starts. Everything above the break is public; everything below is encrypted until a reader pays.</p>
+                        <label class="article-paywall-field">
+                            <span>Price (XMR)</span>
+                            <input id="articlePaywallPrice" type="number" step="0.00001" min="0.00001" placeholder="0.01" />
+                        </label>
+                        <label class="article-paywall-field">
+                            <span>Payment address</span>
+                            <input id="articlePaywallAddress" type="text" placeholder="Your Monero address (4… or 8…)" />
+                        </label>
+                    </div>
+                </fieldset>
+
+                <div class="article-editor-toolbar">
+                    <button class="article-fmt-btn" data-fmt="bold" type="button" title="Bold (Ctrl+B)"><strong>B</strong></button>
+                    <button class="article-fmt-btn" data-fmt="italic" type="button" title="Italic (Ctrl+I)"><em>I</em></button>
+                    <button class="article-fmt-btn" data-fmt="link" type="button" title="Link (Ctrl+K)">🔗</button>
+                    <button class="article-fmt-btn" data-fmt="h2" type="button" title="Heading">H</button>
+                    <button class="article-fmt-btn" data-fmt="code" type="button" title="Code">{ }</button>
+                    <button class="article-fmt-btn" data-fmt="quote" type="button" title="Quote">❝</button>
+                    <button class="article-fmt-btn" data-fmt="list" type="button" title="List">•</button>
+                    <button id="articleInsertPaywallBreakBtn" class="article-fmt-btn" type="button" title="Insert paywall break">🔒</button>
+                </div>
+
+                <textarea id="articleBody" class="article-body-textarea" placeholder="Write your article in markdown…" rows="20"></textarea>
+            </div>
+
+            <div id="articleEditorPreview" class="article-editor-preview" style="display: none;"></div>
+        </div>
+
+        <!-- Settings page (hidden by default) -->
+        <div id="settingsPage" class="settings-page" style="display: none;">
+            <div class="settings-header">
+                <button onclick="goBackFromSettings()" style="background: none; border: none; color: var(--text-primary); cursor: pointer; font-size: 18px; margin-right: 12px;">←</button>
+                <h2>Settings</h2>
+            </div>
+            <div id="settingsPageContent" class="settings-content">
+                <!-- Category sub-nav: switching panes only flips .on classes (all panes stay mounted for saveSettings) -->
+                <div class="nd-set-nav" id="ndSettingsNav">
+                    <button type="button" class="nd-set-tab on" data-nd-pane-btn="payments">Payments</button>
+                    <button type="button" class="nd-set-tab" data-nd-pane-btn="relays">Relays</button>
+                    <button type="button" class="nd-set-tab" data-nd-pane-btn="privacy">Privacy</button>
+                    <button type="button" class="nd-set-tab" data-nd-pane-btn="data">Your data</button>
+                    <button type="button" class="nd-set-tab" data-nd-pane-btn="profile">Profile</button>
+                    <button type="button" class="nd-set-tab" data-nd-pane-btn="feed">Feed &amp; alerts</button>
+                </div>
+
+                <div class="nd-set-pane on" data-nd-pane="payments">
+                <div class="settings-section">
+                    <h3>Default Monero Address</h3>
+                    <input type="text" id="defaultMoneroAddress" placeholder="Your default XMR address" class="nd-set-input" style="width: 100%; padding: 8px;">
+                </div>
+
+                <div class="settings-section">
+                    <h3>Default Zap Amount</h3>
+                    <div style="margin-top: 12px;">
+                        <label style="color: var(--nd-accent); display: block; margin-bottom: 8px;">ⓜ Monero (XMR)</label>
+                        <input type="text" id="defaultXmrZapAmount" placeholder="0.001" step="0.001" class="nd-set-input" style="width: 100%; padding: 8px;">
+                    </div>
+                    <p style="color: var(--text-secondary); font-size: 12px; margin-top: 8px;">Set a default amount for quick zapping</p>
+                </div>
+                </div>
+
+                <div class="nd-set-pane" data-nd-pane="relays">
+                <div class="settings-section">
+                    <h3>Relay Configuration (NIP-65)</h3>
+                    <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 4px;"><strong>Read</strong> relays are where others send replies and mentions to you. <strong>Write</strong> relays are where you publish your own notes.</p>
+                    <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px;">Your <strong>Announced</strong> relays — the subset published in your kind 10002 event — are what other clients use to find your notes and what they pack into shareable <code>nevent</code> references. NIP-65 recommends 2–4 announced relays per category so those references stay short enough to share in IRC and similar channels. Untick <strong>Announce</strong> to keep a relay in your local read/write list without including it in kind 10002.</p>
+
+                    <div style="display: flex; gap: 20px;">
+                        <div style="flex: 1;">
+                            <h4 style="color: var(--nd-accent); margin-bottom: 8px;">Read Relays</h4>
+                            <div id="readRelaysList" style="margin-bottom: 12px; max-height: 200px; overflow-y: auto;"></div>
+                            <input type="text" id="newReadRelayUrl" placeholder="wss://relay.example.com" class="nd-set-input" style="width: 100%; padding: 8px; margin-bottom: 8px;">
+                            <button onclick="addReadRelay()" class="nd-set-btn-accent" style="padding: 8px 16px; width: 100%;">Add Read Relay</button>
+                        </div>
+
+                        <div style="flex: 1;">
+                            <h4 style="color: var(--nd-accent); margin-bottom: 8px;">Write Relays</h4>
+                            <div id="writeRelaysList" style="margin-bottom: 12px; max-height: 200px; overflow-y: auto;"></div>
+                            <input type="text" id="newWriteRelayUrl" placeholder="wss://relay.example.com" class="nd-set-input" style="width: 100%; padding: 8px; margin-bottom: 8px;">
+                            <button onclick="addWriteRelay()" class="nd-set-btn-accent" style="padding: 8px 16px; width: 100%;">Add Write Relay</button>
+                        </div>
+                    </div>
+
+                    <div id="relayAdvertiseHint" class="nd-set-warn" style="display: none; margin-top: 12px; color: var(--text-primary); font-size: 12px;"></div>
+
+                    <div style="margin-top: 12px; padding: 8px; background: var(--bg-input); border-radius: var(--nd-radius);">
+                        <button onclick="resetToDefaultRelays()" class="nd-set-btn-quiet" style="padding: 6px 12px; margin-right: 8px;">Reset to Defaults</button>
+                        <button onclick="importRelayList()" class="nd-set-btn-quiet" style="padding: 6px 12px;">Import from Profile</button>
+                    </div>
+                </div>
+                </div>
+
+                <div class="nd-set-pane" data-nd-pane="privacy">
+                <div class="settings-section">
+                    <h3>Direct Messages</h3>
+                    <div style="margin-top: 12px;">
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="useNip17Dms" style="width: 18px; height: 18px; cursor: pointer;">
+                            <span>Use NIP-17 encrypted DMs (enhanced privacy)</span>
+                        </label>
+                        <div class="nd-set-warn" style="margin-top: 8px;">
+                            <p style="color: var(--nd-rest); font-size: 12px; margin: 0;">⚠️ <strong>Only works with other Nosdag users</strong> who have this enabled.</p>
+                            <p style="color: var(--text-secondary); font-size: 12px; margin: 4px 0 0 0;">Messages to other clients will automatically use standard encryption (NIP-04).</p>
+                        </div>
+                        <p style="color: var(--text-muted); font-size: 11px; margin-top: 8px;">
+                            NIP-17 provides enhanced privacy by hiding message metadata from relays. However, it only works when both sender and recipient use Nosdag with this setting enabled.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <h3>Muted Users</h3>
+                    <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px;">Users you've muted won't appear in your feed or tip disclosures. Your mute list is private and encrypted.</p>
+                    <div id="mutedUsersList" class="nd-set-well">
+                        <!-- Muted users will be populated by JavaScript -->
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <h3>Muted Hashtags</h3>
+                    <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px;">Notes tagged with any of these hashtags will be hidden from your feeds. Public — syncs to other NIP-51 clients (kind 10000).</p>
+                    <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+                        <input id="addMuteHashtagInput" type="text" placeholder="e.g. nsfw (without the #)"
+                               onkeydown="if(event.key==='Enter'){event.preventDefault();addMutedHashtag(event);}"
+                               class="nd-set-input" style="flex: 1; padding: 10px 12px;">
+                        <button onclick="addMutedHashtag(event)"
+                                class="nd-set-btn-accent" style="padding: 10px 16px;">Mute</button>
+                    </div>
+                    <div id="mutedHashtagsList" class="nd-set-well">
+                        <!-- Populated by JavaScript -->
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <h3>Muted Words</h3>
+                    <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px;">Notes containing any of these substrings will be hidden. Case-insensitive, matches anywhere in the note. Private — encrypted to yourself.</p>
+                    <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+                        <input id="addMuteWordInput" type="text" placeholder="e.g. spamword"
+                               onkeydown="if(event.key==='Enter'){event.preventDefault();addMutedWord(event);}"
+                               class="nd-set-input" style="flex: 1; padding: 10px 12px;">
+                        <button onclick="addMutedWord(event)"
+                                class="nd-set-btn-accent" style="padding: 10px 16px;">Mute</button>
+                    </div>
+                    <div id="mutedWordsList" class="nd-set-well">
+                        <!-- Populated by JavaScript -->
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <h3>🔐 Web of Trust</h3>
+                    <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 16px;">NIP-85 trust scoring powered by Relatr</p>
+
+                    <!-- Master Switch -->
+                    <div class="trust-badges-toggle" style="margin-bottom: 16px;">
+                        <div>
+                            <div class="trust-badges-label">Enable Web of Trust</div>
+                            <div class="trust-badges-description" style="color: var(--text-muted); font-size: 11px; margin-top: 2px;">
+                                Calculate trust scores using Relatr
+                            </div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="enableWebOfTrust" checked onchange="toggleWebOfTrust(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+
+                    <!-- Sub-options (enabled when Web of Trust is on) -->
+                    <div id="webOfTrustOptions" style="margin-left: 20px; padding-left: 16px; border-left: 2px solid var(--border-primary);">
+
+                        <!-- Always show on Suggested Follows & New Voices -->
+                        <div style="margin-bottom: 12px; padding: 8px; background: color-mix(in srgb, var(--nd-accent) 5%, transparent); border-radius: 6px;">
+                            <div style="color: var(--nd-accent); font-size: 12px; font-weight: 600; margin-bottom: 4px;">
+                                ✓ Badges shown on Suggested Follows & New Voices
+                            </div>
+                            <div style="color: var(--text-secondary); font-size: 11px;">
+                                Trust scores help discover quality accounts
+                            </div>
+                        </div>
+
+                        <!-- Show badges on all feeds -->
+                        <div class="trust-badges-toggle" style="margin-bottom: 16px;">
+                            <div>
+                                <div class="trust-badges-label">Show badges on all feeds</div>
+                                <div class="trust-badges-description" style="color: var(--text-muted); font-size: 11px; margin-top: 2px;">
+                                    Display scores on home feed, profiles, threads, etc.
+                                </div>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="showTrustBadgesEverywhere" onchange="toggleTrustBadgesEverywhere(this.checked)">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+
+                        <!-- Personalize scores -->
+                        <div class="trust-badges-toggle" style="margin-bottom: 16px;">
+                            <div>
+                                <div class="trust-badges-label">Personalize scores to my network</div>
+                                <div class="trust-badges-description" style="color: var(--text-muted); font-size: 11px; margin-top: 2px;">
+                                    Calculate from your perspective vs global network
+                                </div>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="personalizeScores" checked onchange="togglePersonalizeScores(this.checked)">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+
+                        <!-- Share data with network -->
+                        <div class="trust-badges-toggle">
+                            <div>
+                                <div class="trust-badges-label">Share my scores with the network</div>
+                                <div class="trust-badges-description" style="color: var(--text-muted); font-size: 11px; margin-top: 2px;">
+                                    Help improve trust calculations for others
+                                </div>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="shareDataWithRelatr" onchange="toggleShareData(this.checked)">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div style="margin-top: 8px; padding: 8px; background: color-mix(in srgb, var(--nd-gilt) 8%, transparent); border-left: 3px solid var(--nd-accent); border-radius: var(--nd-radius);">
+                            <p style="color: var(--text-secondary); font-size: 11px; margin: 0;">
+                                ℹ️ Your follow list is already public on Nostr. This allows the Nosdag trust server to use it for network-wide calculations.
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Info box -->
+                    <div style="margin-top: 16px; padding: 12px; background: color-mix(in srgb, var(--nd-accent) 5%, transparent); border-left: 3px solid var(--nd-accent); border-radius: var(--nd-radius);">
+                        <p style="color: var(--text-secondary); font-size: 12px; margin: 0;">
+                            Trust scores are calculated based on social graph distance, NIP-05 verification, Lightning addresses, and relay list publication. Scores range from 0-100, with higher scores indicating more trusted users.
+                        </p>
+                    </div>
+                </div>
+                </div>
+
+                <div class="nd-set-pane" data-nd-pane="data">
+                <div class="settings-section">
+                    <h3>🔑 Private Key</h3>
+                    <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px;">Export your private key (nsec) to back it up or use in another client.</p>
+                    <div class="nd-set-warn" style="margin-bottom: 12px;">
+                        <div style="color: var(--nd-rest); font-size: 12px; line-height: 1.5;">
+                            <strong>Back this up.</strong> If you forget your password and don't have your nsec saved, your account cannot be recovered — there is no email reset link.
+                        </div>
+                    </div>
+                    <div style="padding: 12px; background: var(--bg-elevated); border-radius: var(--nd-radius); margin-bottom: 12px;">
+                        <p id="keyStorageStatus" style="color: var(--text-primary); margin: 0; font-size: 14px;">
+                            <!-- Will be populated by JavaScript -->
+                        </p>
+                    </div>
+                    <button onclick="exportPrivateKey()" class="nd-set-btn-accent" style="padding: 10px 20px;">
+                        Show / Copy / Download
+                    </button>
+                    <p style="color: var(--nd-down); font-size: 11px; margin-top: 8px;">Warning: Never share your private key with anyone!</p>
+                </div>
+
+                <div class="settings-section" id="ndHistoryBackupSection" style="display: none;">
+                    <h3>📦 Note History Backup</h3>
+                    <div id="ndHistoryBackup"><!-- mounted by js/nosdag/history-backup.js (Nosdag shell only) --></div>
+                </div>
+
+                <div class="settings-section" id="ndTimelineImportSection" style="display: none;">
+                    <h3>🕰 Import Timeline to IPFS</h3>
+                    <div id="ndTimelineImport"><!-- mounted by js/nosdag/timeline-import.js (Nosdag shell only) --></div>
+                </div>
+                </div>
+
+                <div class="nd-set-pane" data-nd-pane="profile">
+                <div class="settings-section">
+                    <h3>Banner Image URL</h3>
+                    <input type="text" id="defaultBannerImage" placeholder="Your profile banner image URL" class="nd-set-input" style="width: 100%; padding: 8px;">
+                    <p style="color: var(--text-secondary); font-size: 12px; margin-top: 8px;">Banner image displayed on your profile page</p>
+                </div>
+                </div>
+
+                <div class="nd-set-pane" data-nd-pane="feed">
+                <div class="settings-section">
+                    <h3>📰 Feed</h3>
+
+                    <div class="trust-badges-toggle" style="margin-bottom: 16px;">
+                        <div>
+                            <div class="trust-badges-label">Show my own notes in Following feed</div>
+                            <div class="trust-badges-description" style="color: var(--text-muted); font-size: 11px; margin-top: 2px;">
+                                Include notes you publish in the timeline alongside accounts you follow
+                            </div>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="showOwnNotesInFollowing" checked onchange="toggleShowOwnNotesInFollowing(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <h3>Notifications</h3>
+                    <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px;">Choose which types of notifications to receive</p>
+                    <div style="display: grid; gap: 12px;">
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="notif_replies" checked style="width: 18px; height: 18px; cursor: pointer;">
+                            <span>💬 Replies to my posts</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="notif_mentions" checked style="width: 18px; height: 18px; cursor: pointer;">
+                            <span>📢 Mentions of me</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="notif_likes" checked style="width: 18px; height: 18px; cursor: pointer;">
+                            <span>❤️ Likes on my posts</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="notif_reposts" checked style="width: 18px; height: 18px; cursor: pointer;">
+                            <span>🔄 Reposts of my posts</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="notif_zaps" checked style="width: 18px; height: 18px; cursor: pointer;">
+                            <span>⚡ Zaps & Tips (Lightning + Monero)</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="notif_follows" checked style="width: 18px; height: 18px; cursor: pointer;">
+                            <span>👥 New followers</span>
+                        </label>
+                    </div>
+                    <p style="color: var(--text-muted); font-size: 11px; margin-top: 12px;">
+                        Disabled notification types won't be fetched from relays. Changes take effect on next notification refresh.
+                    </p>
+                </div>
+                </div>
+
+            </div>
+            <!-- Settings Footer - Outside scrollable content for visibility -->
+            <div class="settings-footer">
+                <div style="max-width: 800px; margin: 0 auto; display: flex; gap: 12px;">
+                    <button class="close-btn" onclick="goBackFromSettings()" style="flex: 1; padding: 12px; font-size: 16px;">Cancel</button>
+                    <button class="send-btn" onclick="saveSettings()" style="flex: 2; padding: 12px; font-size: 16px;">Save Settings</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Right Panel (Three-Column Layout) -->
+    <aside class="right-panel" id="rightPanel">
+        <div class="right-panel-resize-handle" id="rightPanelResizeHandle"></div>
+        <div class="right-panel-header">
+            <h3 id="rightPanelTitle">Loading...</h3>
+            <button class="right-panel-close" id="rightPanelClose" onclick="closeRightPanel()" style="display: none;">✕</button>
+        </div>
+        <div class="right-panel-content" id="rightPanelContent">
+            <!-- Default: Trending Monero (logged in) or Popular Notes (logged out) -->
+            <div id="rightPanelDefaultFeed" class="right-panel-feed">
+                <div class="loading">Loading...</div>
+            </div>
+            <!-- Contextual content (thread, profile, settings, etc.) will be injected here -->
+        </div>
+    </aside>
+
+    </div><!-- End .app-container -->
+
+    <!-- Login Modal -->
+    <div class="modal" id="loginModal">
+        <div class="modal-content" style="max-width: 480px;">
+            <div class="modal-header" id="loginModalHeader">Sign In to Nosdag</div>
+
+            <!-- Main Login Buttons -->
+            <div id="loginMainButtons">
+                <!-- Returning User Login Section -->
+                <div id="returningUserSection" class="hidden">
+                    <form id="loginForm" onsubmit="return false;">
+                        <div style="margin-bottom: 12px;">
+                            <input type="text" id="emailOrUsernameInput" placeholder="Username Created on Nosdag"
+                                   style="width: 100%; padding: 12px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 14px;">
+                        </div>
+                        <div style="margin-bottom: 12px;">
+                            <input type="password" id="loginPasswordInput" placeholder="Password"
+                                   style="width: 100%; padding: 12px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 14px;">
+                        </div>
+                        <div style="display: flex; gap: 12px; align-items: center;">
+                            <button type="submit" id="loginBtn" class="send-btn" onclick="authUI.handleLogin()" style="flex: 1;">Log In</button>
+                            <button type="button" class="text-btn" onclick="authUI.showForgotPassword()" style="color: var(--nd-accent); font-size: 13px;">Forgot?</button>
+                        </div>
+                    </form>
+
+                    <div style="display: flex; align-items: center; margin: 20px 0; gap: 12px;">
+                        <div style="flex: 1; height: 1px; background: #333;"></div>
+                        <span style="color: #666; font-size: 12px;">or sign in with a Nostr key</span>
+                        <div style="flex: 1; height: 1px; background: #333;"></div>
+                    </div>
+
+                    <div style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px;">
+                        <button class="login-option-btn" onclick="showLoginWithNsecSection()">
+                            <span style="margin-right: 8px;">🔑</span> Paste nsec
+                        </button>
+                        <button class="login-option-btn" onclick="showLoginWithAmberSection()">
+                            <span style="margin-right: 8px;">📱</span> Amber (bunker)
+                        </button>
+                    </div>
+
+                    <div style="text-align: center; margin-top: 20px;">
+                        <button class="text-btn" onclick="showCreateAccountModal()" style="color: var(--nd-accent); font-size: 14px;">
+                            New to Nostr? Create Account
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Quick Login Buttons -->
+                <div id="quickLoginSection">
+                    <div style="margin-bottom: 16px; color: #999; font-size: 13px;">
+                        Have an account?
+                    </div>
+                    <button class="login-option-btn" onclick="showReturningUserSection()" style="margin-bottom: 20px;">
+                        Log in with Email / Username
+                    </button>
+
+                    <div style="display: flex; align-items: center; margin: 20px 0; gap: 12px;">
+                        <div style="flex: 1; height: 1px; background: #333;"></div>
+                        <span style="color: #666; font-size: 12px;">Already on Nostr?</span>
+                        <div style="flex: 1; height: 1px; background: #333;"></div>
+                    </div>
+
+                    <div style="display: flex; gap: 8px; margin-bottom: 24px; flex-wrap: wrap;">
+                        <button class="nostr-option-btn" onclick="showLoginWithNsecSection()">Paste nsec</button>
+                        <button class="nostr-option-btn" onclick="showLoginWithAmberSection()">Amber</button>
+                    </div>
+
+                    <div style="display: flex; align-items: center; margin: 20px 0; gap: 12px;">
+                        <div style="flex: 1; height: 1px; background: #333;"></div>
+                        <span style="color: #666; font-size: 12px;">New to Nostr?</span>
+                        <div style="flex: 1; height: 1px; background: #333;"></div>
+                    </div>
+
+                    <!-- New User Signup -->
+                    <div id="newUserQuickSection">
+                        <div style="margin-bottom: 16px;">
+                            <input type="text" id="quickDisplayName" placeholder="Display name"
+                                   style="width: 100%; padding: 14px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 15px;">
+                        </div>
+
+                        <button class="send-btn" onclick="showNewUserSection()" style="width: 100%; margin-bottom: 16px;">
+                            Create Account
+                        </button>
+
+                        <div style="color: #666; font-size: 12px; text-align: center;">
+                            Optional: Add email/password for account recovery
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- New User Section - Choose Method -->
+            <div id="newUserSection" class="hidden">
+                <div style="display: flex; flex-direction: column; gap: 12px;">
+                    <button class="login-option-btn" onclick="showEmailPasswordSignup()" style="text-align: left; padding: 16px;">
+                        <div style="font-weight: 600; margin-bottom: 4px;">Create with Username/Password</div>
+                        <div style="font-size: 12px; color: #888;">Familiar login experience - Nostr keys generated & encrypted with your password</div>
+                        <div style="font-size: 11px; color: var(--nd-accent); margin-top: 4px;">Export your nsec/npub anytime to use elsewhere</div>
+                    </button>
+                    <button class="login-option-btn" onclick="showKeysOnlySignup()" style="text-align: left; padding: 16px;">
+                        <div style="font-weight: 600; margin-bottom: 4px;">Just Generate Keys</div>
+                        <div style="font-size: 12px; color: #888;">Advanced - You save and manage your own keys</div>
+                    </button>
+                </div>
+                <button class="close-btn" onclick="authUI.backToMainLogin()" style="margin-top: 16px;">Back</button>
+            </div>
+
+            <!-- Email/Password Signup Form (Username-only, no email stored) -->
+            <div id="emailPasswordSignupSection" class="hidden">
+                <form id="signupForm" onsubmit="return false;">
+                    <!-- Display Name -->
+                    <div style="margin-bottom: 16px;">
+                        <input type="text" id="displayNameInput" placeholder="Display name (e.g., John Smith)"
+                               style="width: 100%; padding: 14px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 15px;">
+                        <div style="font-size: 11px; color: #888; margin-top: 4px;">Public - This name appears on your posts and profile</div>
+                    </div>
+
+                    <!-- Username (required) -->
+                    <div style="margin-bottom: 12px;">
+                        <input type="text" id="signupUsernameInput" placeholder="Username (you'll log in with this)"
+                               style="width: 100%; padding: 12px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 14px;"
+                               oninput="checkUsernameAvailability(this.value)">
+                        <div style="font-size: 11px; color: #888; margin-top: 2px;">Private - Only you see this. Letters, numbers, underscore (3-20 chars)</div>
+                        <div id="usernameAvailability" style="font-size: 11px; margin-top: 2px; min-height: 16px;"></div>
+                    </div>
+
+                    <!-- Password with strength indicator -->
+                    <div style="margin-bottom: 12px;">
+                        <input type="password" id="signupPasswordInput" placeholder="Password"
+                               style="width: 100%; padding: 12px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 14px;"
+                               oninput="updatePasswordStrength(this.value)">
+                        <!-- Password strength meter -->
+                        <div style="margin-top: 8px;">
+                            <div style="display: flex; gap: 4px; margin-bottom: 4px;">
+                                <div id="strengthBar1" style="flex: 1; height: 4px; background: #333; border-radius: 2px;"></div>
+                                <div id="strengthBar2" style="flex: 1; height: 4px; background: #333; border-radius: 2px;"></div>
+                                <div id="strengthBar3" style="flex: 1; height: 4px; background: #333; border-radius: 2px;"></div>
+                                <div id="strengthBar4" style="flex: 1; height: 4px; background: #333; border-radius: 2px;"></div>
+                            </div>
+                            <div id="strengthText" style="font-size: 11px; color: #888;"></div>
+                        </div>
+                    </div>
+
+                    <!-- Confirm Password -->
+                    <div style="margin-bottom: 12px;">
+                        <input type="password" id="confirmPasswordInput" placeholder="Confirm password"
+                               style="width: 100%; padding: 12px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 14px;">
+                    </div>
+
+                    <!-- On-device key: per-machine password + nsec recovery warning -->
+                    <div style="margin-bottom: 16px; padding: 12px; background: color-mix(in srgb, var(--nd-accent) 8%, transparent); border-radius: 8px; border-left: 3px solid var(--nd-accent);">
+                        <div style="color: var(--nd-accent); font-weight: 600; font-size: 13px; margin-bottom: 6px;">⚠️ Save your nsec — it's your only way back in</div>
+                        <div style="color: #ccc; font-size: 12px; line-height: 1.5;">
+                            Your password encrypts a Nostr private key (<code style="background: #222; padding: 1px 4px; border-radius: 3px;">nsec</code>) on <strong>this computer only</strong> — nothing is stored on a server. A strong password (12+ characters, mixed case, numbers, symbols) protects that key if someone gets access to your device. To sign in on another computer — or if you lose this one — you import your nsec, <strong>not</strong> your password. <strong>Lose your nsec and your account can't be recovered</strong> (no email reset). You'll see it on the next screen; save it somewhere safe, or export it any time from <strong>Settings</strong>.
+                        </div>
+                    </div>
+
+                    <!-- Bring-your-own-nsec toggle -->
+                    <div style="margin-bottom: 12px; text-align: center;">
+                        <button type="button" id="existingNsecToggleLink" class="text-btn" onclick="authUI.toggleExistingNsecSignup()" style="color: var(--nd-accent); font-size: 13px; background: none; border: none; cursor: pointer; padding: 4px;">
+                            Already have an nsec? Use it →
+                        </button>
+                    </div>
+                    <div id="existingNsecForSignupContainer" class="hidden" style="margin-bottom: 16px; padding: 12px; background: rgba(139, 92, 246, 0.06); border-radius: 8px; border: 1px solid rgba(139, 92, 246, 0.25);">
+                        <div style="color: var(--nd-accent); font-size: 12px; margin-bottom: 8px; line-height: 1.5;">
+                            Paste an existing <code style="background: #222; padding: 1px 4px; border-radius: 3px;">nsec</code> to anchor this Nosdag account to your current Nostr identity. We'll encrypt it with your password — your existing follows, posts, and reputation carry over.
+                        </div>
+                        <input type="password" id="existingNsecForSignupInput" placeholder="nsec1…" autocomplete="off"
+                               style="width: 100%; padding: 12px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 13px; font-family: monospace;">
+                    </div>
+
+                    <button type="submit" id="createAccountBtn" class="send-btn" onclick="authUI.handleSignup()" style="width: 100%;">
+                        Create Account
+                    </button>
+                </form>
+                <button class="close-btn" onclick="showCreateAccountModal()" style="margin-top: 12px;">Back</button>
+            </div>
+
+            <!-- Keys Only Signup Form -->
+            <div id="keysOnlySignupSection" class="hidden">
+                <form id="keysOnlyForm" onsubmit="return false;">
+                    <div style="margin-bottom: 16px;">
+                        <input type="text" id="keysOnlyDisplayNameInput" placeholder="Display name (e.g., John Smith)"
+                               style="width: 100%; padding: 14px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 15px;">
+                        <div style="font-size: 11px; color: #888; margin-top: 4px;">Your public name shown on your profile</div>
+                    </div>
+                    <div style="margin-bottom: 16px; padding: 12px; background: color-mix(in srgb, var(--nd-accent) 10%, transparent); border-radius: 8px; border-left: 3px solid var(--nd-accent);">
+                        <div style="color: var(--nd-accent); font-size: 13px; line-height: 1.5;">
+                            Your keys will be generated and shown once. Save them securely - if lost, your account cannot be recovered.
+                        </div>
+                    </div>
+                    <button type="submit" class="send-btn" onclick="authUI.handleKeysOnlySignup()" style="width: 100%;">
+                        Generate My Keys
+                    </button>
+                </form>
+                <button class="close-btn" onclick="showCreateAccountModal()" style="margin-top: 12px;">Back</button>
+            </div>
+
+            <!-- Forgot Password Section (nsec-paste reset) -->
+            <div id="forgotPasswordSection" class="hidden">
+                <div style="margin-bottom: 16px; color: #ccc; font-size: 14px; line-height: 1.5;">
+                    Paste the nsec backup you saved at signup. We'll re-encrypt it with a new password and log you in.
+                </div>
+                <div style="margin-bottom: 16px; padding: 12px; background: color-mix(in srgb, var(--nd-accent) 10%, transparent); border-radius: 8px; border-left: 3px solid var(--nd-accent);">
+                    <div style="color: var(--nd-accent); font-size: 13px; line-height: 1.5;">
+                        Your nsec is the only way to recover your account. Without it, Nosdag cannot reset your password.
+                    </div>
+                </div>
+                <form id="forgotPasswordForm" onsubmit="return false;">
+                    <div style="margin-bottom: 12px;">
+                        <input type="text" id="resetUsernameInput" placeholder="Username" autocomplete="username"
+                               style="width: 100%; padding: 14px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 15px;">
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <input type="password" id="resetNsecInput" placeholder="Paste your nsec (nsec1…)" autocomplete="off"
+                               style="width: 100%; padding: 14px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 13px; font-family: monospace;">
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <input type="password" id="resetNewPasswordInput" placeholder="New password" autocomplete="new-password"
+                               style="width: 100%; padding: 14px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 15px;">
+                    </div>
+                    <div style="margin-bottom: 16px;">
+                        <input type="password" id="resetConfirmPasswordInput" placeholder="Confirm new password" autocomplete="new-password"
+                               style="width: 100%; padding: 14px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 15px;">
+                    </div>
+                    <button type="submit" id="forgotPasswordBtn" class="send-btn" onclick="authUI.handlePasswordReset()" style="width: 100%;">
+                        Reset Password & Log In
+                    </button>
+                </form>
+                <button class="close-btn" onclick="authUI.backToMainLogin()" style="margin-top: 12px;">Back</button>
+            </div>
+
+            <!-- Login with nsec Section -->
+            <div id="loginWithNsecSection" class="hidden">
+                <div style="margin-bottom: 16px;">
+                    <input type="password" id="nsecInput" placeholder="Enter your nsec..."
+                           style="width: 100%; padding: 12px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 14px;">
+                </div>
+                <div style="margin-bottom: 16px; color: #999; font-size: 12px;">
+                    Your private key starts with "nsec1..."
+                </div>
+
+                <div style="margin-bottom: 16px; padding: 14px; background: color-mix(in srgb, var(--nd-accent) 10%, transparent); border-radius: 8px; border-left: 3px solid var(--nd-accent);">
+                    <div style="color: var(--nd-accent); font-weight: bold; margin-bottom: 8px;">Security Warning</div>
+                    <div style="color: #ccc; font-size: 13px; line-height: 1.5;">
+                        Your nsec controls your identity permanently. It will be encrypted with a PIN and stored locally.
+                    </div>
+                </div>
+
+                <button class="send-btn" onclick="loginWithNsec()">Login</button>
+                <button class="close-btn" onclick="backToLoginOptions()">Back</button>
+            </div>
+
+            <!-- Login with Amber Section -->
+            <div id="loginWithAmberSection" class="hidden">
+                <div style="margin-bottom: 16px;">
+                    <input type="text" id="amberBunkerInput" placeholder="Paste your bunker URI from Amber..."
+                           style="width: 100%; padding: 12px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 14px;">
+                </div>
+                <div style="margin-bottom: 16px; padding: 12px; background: rgba(139, 92, 246, 0.1); border-radius: 8px; border-left: 3px solid var(--nd-accent);">
+                    <div style="color: var(--nd-accent); font-weight: bold; margin-bottom: 8px;">How to get your bunker URI:</div>
+                    <ol style="color: #ccc; font-size: 13px; margin: 0; padding-left: 20px; line-height: 1.8;">
+                        <li>Open Amber on your Android device</li>
+                        <li>Go to Settings - Connections</li>
+                        <li>Create or select a connection</li>
+                        <li>Copy the bunker:// URI</li>
+                    </ol>
+                </div>
+
+                <button class="send-btn" onclick="loginWithAmber()">Connect to Amber</button>
+                <button class="close-btn" onclick="backToLoginOptions()">Back</button>
+            </div>
+
+            <!-- Key Display Section -->
+            <div id="keyDisplaySection" class="hidden">
+                <div style="margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 6px;">
+                        <div style="color: var(--nd-accent); font-weight: 600;">Your Private Key (nsec)</div>
+                        <div style="display: flex; gap: 6px;">
+                            <button onclick="window.copySecret(document.getElementById('privateKeyDisplay').textContent); this.textContent='📋 Copied!'"
+                                    style="background: color-mix(in srgb, var(--nd-accent) 20%, transparent); border: 1px solid var(--nd-accent); color: var(--nd-accent); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; display: flex; align-items: center; gap: 4px;">
+                                📋 Copy
+                            </button>
+                            <button onclick="authUI.downloadNsecBackup(document.getElementById('privateKeyDisplay').textContent, document.getElementById('signupUsernameInput')?.value || 'nosdag')"
+                                    style="background: rgba(139, 92, 246, 0.2); border: 1px solid var(--nd-accent); color: var(--nd-accent); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; display: flex; align-items: center; gap: 4px;">
+                                💾 Download Backup
+                            </button>
+                        </div>
+                    </div>
+                    <div id="privateKeyDisplay" style="padding: 12px; background: #1a1a1a; border-radius: 8px; font-family: monospace; font-size: 12px; word-break: break-all; color: var(--nd-accent); border: 1px solid color-mix(in srgb, var(--nd-accent) 30%, transparent);"></div>
+                    <!-- Hidden element to store npub for proceedToApp -->
+                    <div id="publicKeyDisplay" style="display: none;"></div>
+                </div>
+
+                <div style="background: linear-gradient(135deg, color-mix(in srgb, var(--nd-accent) 20%, transparent), rgba(139, 92, 246, 0.2)); padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+                    <div style="color: var(--nd-accent); font-weight: bold; margin-bottom: 8px;">⚠️ Save your nsec — this is the only backup</div>
+                    <div style="color: #ccc; font-size: 14px; line-height: 1.5;">
+                        Your <strong>nsec</strong> is your account. Save it in a password manager or download the backup file above.
+                        <div style="margin-top: 10px; color: #FFB070; font-size: 13px;">
+                            If you forget your password and don't have this nsec backed up, <strong>your account cannot be recovered</strong>. There is no email reset link.
+                        </div>
+                        <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.1); color: #888; font-size: 13px;">
+                            You can also find and export your nsec from <strong>Settings</strong> any time after logging in.
+                        </div>
+                    </div>
+                </div>
+
+                <button class="send-btn" onclick="authUI.proceedToApp()">I've Saved It - Continue</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reply Modal -->
+    <div class="modal" id="replyModal">
+        <div class="modal-content">
+            <div class="modal-header">Reply to Post</div>
+            <div id="replyingTo" style="padding: 12px; background: #1a1a1a; border-radius: 8px; margin-bottom: 16px; font-size: 14px; color: #999;"></div>
+            <textarea id="replyContent" placeholder="Write your reply..." maxlength="1000" style="width: 100%; min-height: 120px; padding: 12px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 16px; resize: vertical;"></textarea>
+            
+            <!-- Media Upload Section for Replies -->
+            <div class="media-upload-section">
+                <input type="file" id="replyMediaInput" accept="image/*,video/*,.mov" multiple style="display: none;" onchange="handleMediaUpload(this, 'reply')">
+                <div id="replyMediaPreview" class="media-preview" style="display: none;"></div>
+                <div class="nd-tor-media-note">ANONYMOUS MODE — media you attach won't be viewable outside Nosdag: public gateways can't reach a Tor-only node.</div>
+            </div>
+            
+            <div class="modal-actions">
+                <button type="button" class="media-btn" onclick="document.getElementById('replyMediaInput').click()" title="Add Image/Video">
+                    📎 Media
+                </button>
+                <button class="close-btn" onclick="closeReplyModal()">Cancel</button>
+                <button class="send-btn" onclick="sendReplyToCurrentPost()">Reply</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Highlight Modal (NIP-84) -->
+    <div class="modal" id="highlightModal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">📌 Publish Highlight</div>
+            <blockquote id="highlightPreview" style="padding: 12px 14px; background: rgba(255, 235, 100, 0.08); border-left: 3px solid rgba(255, 235, 100, 0.6); border-radius: 4px; margin: 0 0 16px; font-style: italic; color: #ddd; line-height: 1.55; max-height: 200px; overflow-y: auto;"></blockquote>
+            <textarea id="highlightComment" placeholder="Add a comment (optional)" maxlength="500" style="width: 100%; min-height: 80px; padding: 12px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 14px; resize: vertical; box-sizing: border-box;"></textarea>
+            <div class="modal-actions">
+                <button class="close-btn" id="highlightCancelBtn" type="button">Cancel</button>
+                <button class="send-btn" id="highlightPublishBtn" type="button">Publish</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Repost Modal -->
+    <div class="modal" id="repostModal">
+        <div class="modal-content">
+            <div class="modal-header">Repost</div>
+            <div id="repostingTo" style="padding: 12px; background: #1a1a1a; border-radius: 8px; margin-bottom: 16px; font-size: 14px; color: #999;"></div>
+
+            <!-- Repost Type Toggle -->
+            <div style="margin-bottom: 16px;">
+                <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+                    <button id="quickRepostBtn" onclick="setRepostType('quick')" style="flex: 1; padding: 8px 16px; border: 1px solid var(--nd-accent); border-radius: 6px; background: linear-gradient(135deg, var(--nd-accent), var(--nd-accent)); color: #000; font-weight: bold; cursor: pointer;">Quick Repost</button>
+                    <button id="addCommentBtn" onclick="setRepostType('comment')" style="flex: 1; padding: 8px 16px; border: 1px solid #333; border-radius: 6px; background: transparent; color: #fff; cursor: pointer;">Add Comment</button>
+                </div>
+                <div id="quickRepostDesc" style="color: #666; font-size: 14px;">Share this note to your followers without adding commentary</div>
+                <div id="addCommentDesc" style="color: #666; font-size: 14px; display: none;">Quote this note and add your own commentary</div>
+            </div>
+
+            <!-- Comment Section (hidden by default) -->
+            <div id="repostCommentSection" class="compose-area" style="display: none; margin-bottom: 16px;">
+                <textarea id="repostComment" class="compose-textarea" placeholder="Add your thoughts..." maxlength="1000" style="width: 100%; min-height: 100px; padding: 12px; border: 1px solid #333; border-radius: 8px; background: #000; color: #fff; font-size: 16px; resize: vertical;"></textarea>
+                <div class="compose-toolbar">
+                    <button type="button" data-format="bold" title="Bold (Ctrl+B)"><strong>B</strong></button>
+                    <button type="button" data-format="italic" title="Italic (Ctrl+I)"><em>I</em></button>
+                    <button type="button" data-format="link" title="Link (Ctrl+K)">🔗</button>
+                    <button type="button" data-format="mention" title="Mention (paste npub)">@</button>
+                    <button type="button" data-format="code" title="Code">&lt;/&gt;</button>
+                    <button type="button" data-format="quote" title="Quote">"</button>
+                    <button type="button" data-format="list" title="Bullet list">•</button>
+                    <button type="button" data-format="emoji" title="Add emoji">😀</button>
+                </div>
+                <div class="emoji-picker" style="display: none;">
+                    <div class="emoji-grid">😀😃😄😁😅😂🤣😊😇🙂😉😌😍🥰😘😗😋😛😜🤪😎🤩🥳😏😒😔😟😕🙁😣😢😭😤😠😡🤬😱😨😰🤔🤫🤭🤥😶😐😑🙄😬😮😲🥱😴🤤😷🤒🤕🤢🤮🤧🥵🥶🥴😵🤯🤠🥳🥸😎🤓🧐😈👿👋🤚✋🖐️👌🤌✌️🤞🤟🤘🤙👈👉👆👇☝️👍👎✊👊🤛🤜👏🙌👐🤝🙏💪🦾❤️🧡💛💚💙💜🖤🤍🤎💔❣️💕💞💓💗💖💘💝✨⭐🌟💫🔥💥💢💦💨🎉🎊🎁🏆🥇🥈🥉</div>
+                </div>
+            </div>
+
+            <div class="modal-actions">
+                <button class="close-btn" onclick="closeRepostModal()">Cancel</button>
+                <button id="repostBtn" class="send-btn" onclick="sendRepost()">Repost</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Profile Modal -->
+    <div class="modal" id="profileModal">
+        <div class="modal-content">
+            <div class="modal-header">Profile</div>
+            <div id="profileContent"></div>
+            <div class="modal-actions">
+                <button class="close-btn" onclick="closeProfileModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- User Profile Modal -->
+    <div class="modal" id="userProfileModal">
+        <div class="modal-content">
+            <div id="userProfileContent"></div>
+            <div class="modal-actions">
+                <button class="close-btn" onclick="closeUserProfileModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Thread View Modal -->
+    <div class="modal" id="threadModal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">Thread</div>
+            <div id="threadContent" style="max-height: 70vh; overflow-y: auto;"></div>
+            <div class="modal-actions">
+                <button class="close-btn" onclick="closeThreadModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Zap Modal -->
+    <div class="modal" id="zapModal">
+        <div class="modal-content">
+            <div class="modal-header">Tip with Monero</div>
+            <div id="zapDetails"></div>
+            <div class="qr-container">
+                <div id="qrCode"></div>
+            </div>
+            <div class="modal-footer">
+                <div style="font-size: 12px; color: #666; margin-bottom: 16px;">
+                    Scan with your Monero wallet
+                </div>
+                <button class="close-btn" onclick="closeZapModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- PIN Entry Modal (for encrypted key storage) -->
+    <div class="modal" id="pinModal" style="display: none;">
+        <div class="modal-content" style="max-width: 400px;">
+            <div class="modal-header">🔐 Secure Your Account</div>
+            <div style="padding: 20px;">
+                <p id="pinModalMessage" style="margin-bottom: 20px; color: var(--text-secondary);">Create a PIN to encrypt your private key</p>
+
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 8px; color: var(--text-muted);">Enter PIN (4-8 digits)</label>
+                    <input type="password" id="pinInput"
+                           placeholder="Enter PIN..."
+                           maxlength="8"
+                           style="width: 100%; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-primary); border-radius: 6px; color: var(--text-primary); font-size: 16px; text-align: center; letter-spacing: 4px;">
+                </div>
+
+                <div id="pinConfirmSection" style="margin-bottom: 20px; display: none;">
+                    <label style="display: block; margin-bottom: 8px; color: var(--text-muted);">Confirm PIN</label>
+                    <input type="password" id="pinConfirmInput"
+                           placeholder="Confirm PIN..."
+                           maxlength="8"
+                           style="width: 100%; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-primary); border-radius: 6px; color: var(--text-primary); font-size: 16px; text-align: center; letter-spacing: 4px;">
+                </div>
+
+                <div style="background: color-mix(in srgb, var(--nd-accent) 10%, transparent); border: 1px solid color-mix(in srgb, var(--nd-accent) 30%, transparent); border-radius: 6px; padding: 12px; margin-top: 16px;">
+                    <div style="color: var(--nd-accent); font-weight: bold; margin-bottom: 4px;">⚠️ Important</div>
+                    <div style="color: var(--text-muted); font-size: 13px;">
+                        Your PIN encrypts your private key in browser storage. Don't forget it - we cannot recover it!
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="send-btn" id="pinSubmitBtn" onclick="submitPin()"
+                        style="background: linear-gradient(135deg, var(--nd-accent), var(--nd-accent));">Continue</button>
+                <button class="close-btn" id="pinCancelBtn" onclick="cancelPin()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Disclosure Prompt Modal -->
+    <div class="modal" id="disclosurePromptModal">
+        <div class="modal-content" style="max-width: 650px;">
+            <div class="modal-header">💰 Tip Disclosure Options</div>
+            <div style="padding: 20px;">
+                <p style="margin-bottom: 20px; color: #ccc;">Choose how you want to handle this tip:</p>
+
+                <!-- Option A: Keep it Secret -->
+                <label style="display: block; padding: 14px; margin-bottom: 12px; background: rgba(100, 100, 100, 0.1); border: 2px solid #444; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
+                       onmouseover="this.style.background='rgba(100,100,100,0.15)'; this.style.borderColor='#666';"
+                       onmouseout="this.style.background='rgba(100,100,100,0.1)'; this.style.borderColor='#444';">
+                    <div style="display: flex; align-items: start;">
+                        <input type="radio" name="disclosureOption" value="secret" checked onchange="updateDisclosureOption()"
+                               style="margin-right: 12px; margin-top: 4px;">
+                        <div style="flex: 1;">
+                            <div style="font-weight: 600; font-size: 15px; color: #fff; margin-bottom: 4px;">🔒 Keep it Secret</div>
+                            <div style="font-size: 13px; color: #999;">No public record of this tip</div>
+                        </div>
+                    </div>
+                </label>
+
+                <!-- Option B: Disclose (No Verification) -->
+                <label style="display: block; padding: 14px; margin-bottom: 12px; background: color-mix(in srgb, var(--nd-accent) 10%, transparent); border: 2px solid color-mix(in srgb, var(--nd-accent) 30%, transparent); border-radius: 8px; cursor: pointer; transition: all 0.2s;"
+                       onmouseover="this.style.background='color-mix(in srgb, var(--nd-accent) 15%, transparent)'; this.style.borderColor='color-mix(in srgb, var(--nd-accent) 50%, transparent)';"
+                       onmouseout="this.style.background='color-mix(in srgb, var(--nd-accent) 10%, transparent)'; this.style.borderColor='color-mix(in srgb, var(--nd-accent) 30%, transparent)';">
+                    <div style="display: flex; align-items: start;">
+                        <input type="radio" name="disclosureOption" value="disclose" onchange="updateDisclosureOption()"
+                               style="margin-right: 12px; margin-top: 4px;">
+                        <div style="flex: 1;">
+                            <div style="font-weight: 600; font-size: 15px; color: var(--nd-accent); margin-bottom: 4px;">💰 Disclose (No Verification)</div>
+                            <div style="font-size: 13px; color: #999;">Honor system, no cryptographic proof</div>
+                        </div>
+                    </div>
+                </label>
+
+                <!-- Option C: Disclose + Verify -->
+                <label style="display: block; padding: 14px; margin-bottom: 20px; background: rgba(16, 185, 129, 0.1); border: 2px solid rgba(16, 185, 129, 0.3); border-radius: 8px; cursor: pointer; transition: all 0.2s;"
+                       onmouseover="this.style.background='rgba(16,185,129,0.15)'; this.style.borderColor='rgba(16,185,129,0.5)';"
+                       onmouseout="this.style.background='rgba(16,185,129,0.1)'; this.style.borderColor='rgba(16,185,129,0.3)';">
+                    <div style="display: flex; align-items: start;">
+                        <input type="radio" name="disclosureOption" value="verify" onchange="updateDisclosureOption()"
+                               style="margin-right: 12px; margin-top: 4px;">
+                        <div style="flex: 1;">
+                            <div style="font-weight: 600; font-size: 15px; color: #10B981; margin-bottom: 4px;">✓ Disclose + Verify</div>
+                            <div style="font-size: 13px; color: #999;">Cryptographically verified with blockchain proof. Verified badge displayed publicly on the note.</div>
+                        </div>
+                    </div>
+                </label>
+
+                <!-- Message Field (shown for all public options) -->
+                <div id="messageSection" style="display: none; margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 8px; color: #999; font-size: 14px;">Message (optional)</label>
+                    <textarea id="disclosurePromptMessage" rows="3"
+                              placeholder="Add a message with your tip..."
+                              style="width: 100%; padding: 10px; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; color: #fff; resize: vertical;"></textarea>
+                </div>
+
+                <!-- Verification Fields (shown only for verify options) -->
+                <div id="verificationFields" style="display: none; padding: 16px; background: rgba(0, 0, 0, 0.3); border-radius: 8px; margin-bottom: 16px;">
+                    <div style="margin-bottom: 16px;">
+                        <label style="display: block; margin-bottom: 6px; color: #aaa; font-size: 13px;">Transaction ID (TXID)</label>
+                        <input type="text" id="verificationTxid"
+                               placeholder="Get from your wallet's transaction history..."
+                               style="width: 100%; padding: 10px; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; color: #fff; font-family: monospace; font-size: 12px;">
+                    </div>
+
+                    <div style="margin-bottom: 16px;">
+                        <label style="display: block; margin-bottom: 6px; color: #aaa; font-size: 13px;">Transaction Key (tx_key)</label>
+                        <input type="text" id="verificationTxKey"
+                               placeholder="Run: get_tx_key <txid> in your wallet..."
+                               style="width: 100%; padding: 10px; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; color: #fff; font-family: monospace; font-size: 12px;">
+                        <div style="font-size: 11px; color: #666; margin-top: 4px;">
+                            CLI: get_tx_key &lt;txid&gt; | GUI: Right-click transaction → Get transaction key
+                        </div>
+                    </div>
+
+                    <div style="padding: 12px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px;">
+                        <div style="font-size: 12px; color: #aaa; line-height: 1.6;">
+                            <strong style="color: #10B981;">🔍 Public Blockchain Verification</strong><br>
+                            Your transaction details (TXID & tx_key) will be:<br>
+                            • Verified instantly against the Monero blockchain<br>
+                            • Published as tags on a public kind 9736 tip event<br>
+                            • Anyone can re-verify the amount via Monero's check_tx_key
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="send-btn" onclick="submitDisclosurePrompt()"
+                        style="background: linear-gradient(135deg, var(--nd-accent), var(--nd-accent));">Confirm</button>
+                <button class="close-btn" onclick="closeDisclosurePromptModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Zap Queue Modal -->
+    <div class="modal" id="zapQueueModal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">XMR Zap Queue</div>
+            <div id="zapQueueContent">
+                <!-- Queue content will be dynamically populated -->
+            </div>
+            <div class="modal-footer">
+                <button class="send-btn" onclick="showBatchQrCodes()" style="background: linear-gradient(135deg, var(--nd-accent), var(--nd-accent));">Process Queue</button>
+                <button class="close-btn" onclick="closeZapQueueModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Post Menu -->
+    <div id="postMenu" class="post-menu" style="display: none;">
+        <button id="postMenuBookmarkBtn" onclick="toggleBookmark()">☆ Bookmark</button>
+        <button id="postMenuPinBtn" onclick="togglePin()" style="display: none;">📌 Pin to Profile</button>
+        <button onclick="copyPostLink()">Copy Link</button>
+        <button onclick="copyPostNevent()">Copy as nevent</button>
+        <button onclick="copyPostId()">Copy Note ID</button>
+        <button onclick="copyPostJson()">Copy JSON</button>
+        <button onclick="viewPostSource()">View Source</button>
+        <button id="postMenuDeleteBtn" onclick="requestDeletion()" style="color: #ff6b6b;">Request Deletion</button>
+        <button onclick="muteUser()">Mute User</button>
+        <button onclick="reportPost()">Report</button>
+    </div>
+
+    <!-- Generated Key Modal -->
+    <div class="modal" id="keyModal">
+        <!-- Content will be generated by JavaScript -->
+    </div>
+
+    <!-- XMR Wallet Modal (Full-screen overlay) -->
+    <div class="modal" id="walletModal" style="display: none; z-index: 2000;">
+        <div class="modal-content" style="max-width: 600px; width: 100%; max-height: 90vh; margin: 20px auto; border-radius: 16px; display: flex; flex-direction: column; overflow: hidden;">
+            <!-- Wallet Modal Header -->
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--border-color); background: #0a0a0a; flex-shrink: 0;">
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <button onclick="closeWalletModal()" style="background: none; border: none; color: var(--text-secondary); font-size: 20px; cursor: pointer; padding: 4px;">✕</button>
+                    <h2 id="walletModalTitle" style="margin: 0; font-size: 18px; background: linear-gradient(135deg, var(--nd-accent), var(--nd-accent)); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">⛏️ XMR Tip Jar</h2>
+                </div>
+                <button id="walletLockBtn" onclick="lockWallet()" style="background: none; border: 1px solid var(--border-color); color: var(--text-secondary); padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; display: none;">🔒 Lock</button>
+            </div>
+
+            <!-- Wallet Modal Content (scrollable) -->
+            <div id="walletModalContent" style="flex: 1; overflow-y: auto; padding: 20px;">
+                <!-- Content will be dynamically rendered by wallet-modal.js -->
+                <div style="text-align: center; padding: 40px;">
+                    <div style="width: 40px; height: 40px; margin: 0 auto 20px; border: 3px solid #333; border-top-color: var(--nd-accent); border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                    <p style="color: #999;">Loading wallet...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification Container -->
+    <div id="toastContainer"></div>
+
+    <!-- Security: DOMPurify for XSS protection -->
+    <script src="/lib/purify.min.js"></script>
+
+    <!-- Markdown parser for compose preview -->
+    <script src="/lib/marked.min.js" integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+" crossorigin="anonymous"></script>
+
+    <!-- Tor relay bridge shim: patches window.WebSocket so relay sockets route through main's loopback
+         SOCKS bridge in anonymous mode (Electron 42's renderer ignores setProxy for WS — electron#34810).
+         CLASSIC script, loaded BEFORE nostr-tools so the pool uses the patched constructor. No-op in
+         clearnet posture. -->
+    <script src="/js/nosdag/ws-tor-shim.js"></script>
+
+    <!-- Load nostr-tools from local copy -->
+    <script src="/lib/nostr-tools.bundle.js"></script>
+
+    <!-- Monero wallet library (client-side WebAssembly) -->
+    <!-- SRI hash protects against supply chain attacks on the WASM bundle -->
+    <script src="/lib/monero-wallet.iife.js" integrity="sha384-gNGdgKHQok1SRL9i3qj4OuKW4FXf10WXAOiIqym1kzo7WLwIaXoRGCNOcxK5wLfe" crossorigin="anonymous"></script>
+
+    <!-- IPFS Embed Modal -->
+
+    <!-- Load the modular v2 application (UI modules consolidated into /js/ui/) -->
+    <script type="module" src="/js/app.js"></script>
+
+    <!-- XMR Wallet Modal (replaces wallet.html) -->
+    <script type="module" src="/js/wallet-modal.js"></script>
+</body>
+</html>
