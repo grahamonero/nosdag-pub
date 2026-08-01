@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nosdag — your notes, on your own node</title>
+<meta name="description" content="A peer-to-peer desktop social network. Nostr keys for identity, an IPFS node in the app for your data, Monero tips, and an anonymous Tor mode.">
+<link rel="icon" href="nosdag-icon.png">
+<meta property="og:title" content="Nosdag — your notes, on your own node">
+<meta property="og:description" content="A peer-to-peer desktop social network. Nostr keys for identity, an IPFS node in the app for your data, Monero tips, and an anonymous Tor mode.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://nosdag.com/">
+<style>
+@font-face{font-family:'Alegreya Sans';src:url('fonts/alegreya-sans-latin-400-normal.woff2') format('woff2');font-weight:400;font-display:swap}
+@font-face{font-family:'Alegreya Sans';src:url('fonts/alegreya-sans-latin-500-normal.woff2') format('woff2');font-weight:500;font-display:swap}
+@font-face{font-family:'Alegreya Sans';src:url('fonts/alegreya-sans-latin-700-normal.woff2') format('woff2');font-weight:700;font-display:swap}
+@font-face{font-family:'Alegreya Sans';src:url('fonts/alegreya-sans-latin-800-normal.woff2') format('woff2');font-weight:800;font-display:swap}
+@font-face{font-family:'JetBrains Mono';src:url('fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2');font-weight:400;font-display:swap}
+@font-face{font-family:'JetBrains Mono';src:url('fonts/jetbrains-mono-latin-500-normal.woff2') format('woff2');font-weight:500;font-display:swap}
+
+/* ---- The Ledger (dark, default) ---- */
+:root{
+  --ground:#171310; --card:#1e1914; --card2:#241e17;
+  --txt:#ECE3D2; --body:#e6dcc8; --dim:#b3a78e; --mute:#7d7261;
+  --accent:#C5402E; --accent-hi:#e0654f; --accent-deep:#8f2b1e;
+  --accent-soft:rgba(197,64,46,.16); --on-accent:#f6ead9;
+  --gilt:#B08D57;
+  --line:rgba(232,224,208,.12); --line2:rgba(232,224,208,.22);
+  --ok:#7ca66a; --rest:#c9973f;
+  --radius:3px;
+  --card-border:1px solid var(--line);
+  --card-top:3px double var(--line2);
+  --card-shadow:none;
+  --sans:'Alegreya Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --mono:'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace;
+}
+/* ---- The Press (light) ---- */
+@media (prefers-color-scheme: light){
+  :root{
+    --ground:#ECE9E2; --card:#F7F4EC; --card2:#ECE9E2;
+    --txt:#17161A; --body:#17161A; --dim:rgba(23,22,26,.62); --mute:rgba(23,22,26,.45);
+    --accent:#2456B3; --accent-hi:#4a7dd6; --accent-deep:#183f85;
+    --accent-soft:rgba(36,86,179,.12); --on-accent:#F7F4EC;
+    --gilt:rgba(23,22,26,.55);
+    --line:rgba(23,22,26,.2); --line2:rgba(23,22,26,.45);
+    --ok:#2e7d4a; --rest:#a06a10;
+    --radius:2px;
+    --card-border:2px solid #17161A;
+    --card-top:2px solid #17161A;
+    --card-shadow:5px 5px 0 rgba(23,22,26,.14);
+  }
+}
+
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--ground); color:var(--body);
+  font-family:var(--sans); font-size:17px; line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:980px; margin:0 auto; padding:0 24px}
+a{color:var(--accent); text-decoration:none; border-bottom:1px solid var(--accent-soft)}
+a:hover{border-bottom-color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent); outline-offset:3px}
+h1,h2,h3{font-weight:800; color:var(--txt); line-height:1.15; margin:0}
+.micro{
+  font-family:var(--mono); font-size:10px; font-weight:500;
+  letter-spacing:.2em; text-transform:uppercase; color:var(--gilt);
+}
+.mono{font-family:var(--mono)}
+
+/* ---- top bar ---- */
+.top{
+  border-bottom:1px solid var(--line); position:sticky; top:0; z-index:20;
+  background:var(--ground);
+}
+.top .wrap{display:flex; align-items:center; gap:14px; padding-top:14px; padding-bottom:14px}
+.brand{display:flex; align-items:center; gap:11px; font-weight:800; font-size:19px; color:var(--txt)}
+.brand img{width:28px; height:28px; border-radius:6px}
+.top nav{margin-left:auto; display:flex; gap:20px; align-items:center}
+.top nav a{color:var(--dim); border:0; font-size:14.5px}
+.top nav a:hover{color:var(--txt)}
+
+/* ---- hero ---- */
+.hero{padding:72px 0 8px}
+.hero-grid{display:grid; grid-template-columns:1fr 1fr; gap:56px; align-items:start}
+h1{font-size:clamp(34px,5.2vw,54px); letter-spacing:-.015em}
+.lede{font-size:19.5px; color:var(--dim); margin:20px 0 0; max-width:34ch}
+.cta{display:flex; flex-wrap:wrap; gap:12px; margin-top:30px}
+.btn{
+  font-family:var(--sans); font-weight:700; font-size:15.5px;
+  padding:11px 20px; border-radius:var(--radius); cursor:pointer;
+  background:var(--accent); color:var(--on-accent); border:none; display:inline-block;
+}
+.btn:hover{background:var(--accent-hi)}
+.btn-quiet{background:transparent; color:var(--txt); border:1px solid var(--line2)}
+.btn-quiet:hover{background:transparent; border-color:var(--txt)}
+@media (prefers-color-scheme: light){
+  .btn{box-shadow:3px 3px 0 var(--accent-deep)}
+  .btn:hover{background:var(--accent-hi)}
+  .btn-quiet{border:2px solid #17161A; box-shadow:3px 3px 0 rgba(23,22,26,.14)}
+}
+a.btn{border-bottom:none}
+
+/* ---- the signature: a chain of ledger entries ---- */
+.ledger{position:relative; padding-left:34px}
+.ledger::before{
+  content:''; position:absolute; left:10px; top:16px; bottom:26px;
+  width:1px; background:var(--line2);
+}
+.entry{
+  position:relative; background:var(--card); border:var(--card-border);
+  border-top:var(--card-top); box-shadow:var(--card-shadow);
+  border-radius:var(--radius); padding:14px 16px; margin-bottom:16px;
+}
+.entry::before{
+  content:''; position:absolute; left:-34px; top:18px;
+  width:21px; height:21px; border-radius:50%;
+  background:radial-gradient(circle at 34% 30%, var(--accent-hi), var(--accent) 55%, var(--accent-deep));
+}
+@media (prefers-color-scheme: light){
+  .entry::before{
+    background:var(--card); border:2px solid var(--accent);
+    transform:rotate(-8deg); border-radius:3px;
+  }
+}
+.entry p{margin:8px 0 10px; font-size:15.5px; color:var(--body)}
+.entry .cid{font-family:var(--mono); font-size:11.5px; color:var(--gilt); word-break:break-all}
+.entry .prev{font-family:var(--mono); font-size:11px; color:var(--mute); margin-top:3px}
+.ledger-note{font-size:13.5px; color:var(--mute); padding-left:0; margin:14px 0 0}
+
+/* ---- sections ---- */
+section{padding:64px 0}
+.rule{border:0; border-top:var(--card-top); margin:0}
+.sec-head{margin-bottom:34px}
+.sec-head h2{font-size:clamp(24px,3.4vw,32px); margin-top:8px}
+.sec-head p{color:var(--dim); margin:12px 0 0; max-width:62ch}
+
+.cards{display:grid; grid-template-columns:repeat(2,1fr); gap:18px}
+.card{
+  background:var(--card); border:var(--card-border); border-top:var(--card-top);
+  box-shadow:var(--card-shadow); border-radius:var(--radius); padding:20px 22px;
+}
+.card h3{font-size:18.5px; margin:9px 0 8px}
+.card p{margin:0; font-size:15.5px; color:var(--dim)}
+
+/* ---- terminal ---- */
+.steps{counter-reset:step; list-style:none; padding:0; margin:0}
+.steps > li{counter-increment:step; position:relative; padding-left:44px; margin-bottom:26px}
+.steps > li::before{
+  content:counter(step,decimal-leading-zero);
+  position:absolute; left:0; top:1px;
+  font-family:var(--mono); font-size:12px; font-weight:500; color:var(--gilt);
+  letter-spacing:.08em;
+}
+.steps h3{font-size:17px; margin-bottom:6px}
+.steps p{margin:0 0 10px; color:var(--dim); font-size:15.5px}
+pre{
+  background:var(--card2); border:var(--card-border); border-radius:var(--radius);
+  padding:14px 16px; overflow-x:auto; margin:0;
+  font-family:var(--mono); font-size:13.5px; line-height:1.75; color:var(--txt);
+}
+@media (prefers-color-scheme: light){ pre{border:2px solid #17161A} }
+pre .c{color:var(--mute)}
+pre .p{color:var(--accent)}
+
+/* ---- status callout ---- */
+.callout{
+  background:var(--card); border:var(--card-border); border-left:3px solid var(--rest);
+  border-radius:var(--radius); padding:18px 20px; margin-top:22px;
+}
+.callout strong{color:var(--txt)}
+.callout p{margin:6px 0 0; color:var(--dim); font-size:15.5px}
+
+/* ---- faq ---- */
+.faq{border-top:1px solid var(--line)}
+.faq details{border-bottom:1px solid var(--line); padding:2px 0}
+.faq summary{
+  cursor:pointer; list-style:none; padding:17px 30px 17px 0; position:relative;
+  font-weight:700; color:var(--txt); font-size:17px;
+}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary::after{
+  content:'+'; position:absolute; right:4px; top:15px;
+  font-family:var(--mono); color:var(--accent); font-size:19px; font-weight:400;
+}
+.faq details[open] summary::after{content:'–'}
+.faq summary:hover{color:var(--accent)}
+.faq .a{padding:0 30px 20px 0; color:var(--dim); font-size:15.5px; max-width:72ch}
+.faq .a p{margin:0 0 10px}
+.faq .a p:last-child{margin-bottom:0}
+.faq .a code{font-family:var(--mono); font-size:13px; color:var(--txt)}
+
+/* ---- footer ---- */
+footer{border-top:var(--card-top); padding:40px 0 60px; color:var(--mute); font-size:14.5px}
+footer .wrap{display:flex; flex-wrap:wrap; gap:8px 26px; align-items:center}
+footer a{color:var(--dim); border:0}
+footer a:hover{color:var(--accent)}
+footer .sp{margin-left:auto}
+
+/* ---- reveal ---- */
+.rv{opacity:0; transform:translateY(6px); transition:opacity .5s ease, transform .5s ease}
+.rv.in{opacity:1; transform:none}
+@media (prefers-reduced-motion: reduce){
+  .rv{opacity:1; transform:none; transition:none}
+  *{scroll-behavior:auto !important}
+}
+
+@media (max-width:820px){
+  .hero-grid{grid-template-columns:1fr; gap:40px}
+  .cards{grid-template-columns:1fr}
+  .hero{padding-top:48px}
+  section{padding:48px 0}
+  .top nav a.hide-sm{display:none}
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <span class="brand"><img src="nosdag-icon.png" alt="">Nosdag</span>
+    <nav>
+      <a href="#what" class="hide-sm">What it is</a>
+      <a href="#run">Run it</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://github.com/grahamonero/nosdag-pub">Source</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="micro">Peer-to-peer · desktop</p>
+      <h1>Your notes, on your own node.</h1>
+      <p class="lede">Nosdag is a desktop social network built on Nostr keys and an IPFS node that
+        runs inside the app. Relays carry pointers. Your machine carries your data.</p>
+      <div class="cta">
+        <a class="btn" href="#run">Run it from source</a>
+        <a class="btn btn-quiet" href="https://github.com/grahamonero/nosdag-pub/releases">Releases</a>
+      </div>
+    </div>
+
+    <div class="ledger rv">
+      <article class="entry">
+        <p class="micro">entry 3 · signed</p>
+        <p>Swapped to anonymous mode. Same account, same notes, nothing sees my IP.</p>
+        <div class="cid">bafyreihq4k…7mzt</div>
+        <div class="prev">prev ↑ bafyreic2xn…q9de</div>
+      </article>
+      <article class="entry">
+        <p class="micro">entry 2 · signed</p>
+        <p>Attached a photo. It went to my node, not somebody's bucket.</p>
+        <div class="cid">bafyreic2xn…q9de</div>
+        <div class="prev">prev ↑ bafyreif8ld…3vha</div>
+      </article>
+      <article class="entry">
+        <p class="micro">entry 1 · signed</p>
+        <p>First note from my own machine.</p>
+        <div class="cid">bafyreif8ld…3vha</div>
+        <div class="prev">genesis</div>
+      </article>
+      <p class="ledger-note">Every note links to the one before it, by content address. Pin the
+        newest and you have replicated the whole history — verifiable against your key, by anyone.</p>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<section id="what">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <p class="micro">What it is</p>
+      <h2>A social network that doesn't need a server</h2>
+      <p>Nostr gives you an identity nobody can revoke. Nosdag adds the missing half: somewhere for
+        your data to live that is also yours. That turns out to change what the app can offer.</p>
+    </div>
+    <div class="cards">
+      <div class="card rv">
+        <p class="micro">Storage</p>
+        <h3>An IPFS node in the app</h3>
+        <p>Notes, media, and long-form all live on a node running on your machine, addressed by
+          content. Relays shrink to kilobyte pointer databases.</p>
+      </div>
+      <div class="card rv">
+        <p class="micro">Payments</p>
+        <h3>Monero tips, no middleman</h3>
+        <p>A wallet is built in. Tip any note or profile in XMR, or paywall a post and sell the
+          key. No custodian, no invoice server.</p>
+      </div>
+      <div class="card rv">
+        <p class="micro">Privacy</p>
+        <h3>An anonymous mode over Tor</h3>
+        <p>Run the whole app through Tor — relays, peers, media, wallet. Peers reach each other
+          through onion services. Already running your own Tor router? Point Nosdag at it.</p>
+      </div>
+      <div class="card rv">
+        <p class="micro">Availability</p>
+        <h3>Stay reachable, on your terms</h3>
+        <p>Link a pinning service, host the accounts you follow, or export your entire history as
+          a single file. Nothing about that is the app's decision to make.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<section id="run">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <p class="micro">Run it</p>
+      <h2>From source, in four commands</h2>
+      <p>There are no packaged installers yet — running from source is the way in right now, and
+        it takes about a minute on a machine that already has Node.</p>
+    </div>
+
+    <ol class="steps">
+      <li class="rv">
+        <h3>Install Node.js 22.12 or newer</h3>
+        <p>The repo ships an <code class="mono">.nvmrc</code>, so with nvm it is one command.</p>
+<pre><span class="c"># with nvm — otherwise install Node 22 however you prefer</span>
+nvm install 22 &amp;&amp; nvm use 22</pre>
+      </li>
+      <li class="rv">
+        <h3>Clone the repository</h3>
+<pre>git clone https://github.com/grahamonero/nosdag-pub.git
+cd nosdag-pub</pre>
+      </li>
+      <li class="rv">
+        <h3>Install dependencies</h3>
+        <p>This downloads the Electron runtime and the IPFS (Kubo) binary the app bundles, so give
+          it a moment and a working network connection.</p>
+<pre>npm install</pre>
+      </li>
+      <li class="rv">
+        <h3>Start Nosdag</h3>
+        <p>On first launch you pick a network posture: ordinary internet, or anonymous over Tor.</p>
+<pre>npm start</pre>
+      </li>
+    </ol>
+
+    <div class="callout rv">
+      <strong>Optional extras.</strong>
+      <p><span class="mono">ffmpeg</span> on your PATH lets you attach video from a phone — Nosdag
+        strips the metadata and converts it so everyone can play it. <span class="mono">tor</span>
+        is needed for anonymous mode; if it is not on your PATH, start the app with
+        <span class="mono">TOR_BIN=/path/to/tor npm start</span>.</p>
+    </div>
+
+    <div class="callout rv">
+      <strong>Packaged builds are not out yet.</strong>
+      <p>Installers for Linux, macOS, and Windows are the next thing being built. When they exist
+        they will appear on the
+        <a href="https://github.com/grahamonero/nosdag-pub/releases">releases page</a> — until then
+        that page will be empty, and the four commands above are the honest answer.</p>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<section id="faq">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <p class="micro">FAQ</p>
+      <h2>Questions worth asking first</h2>
+    </div>
+
+    <div class="faq">
+      <details>
+        <summary>Is Nosdag finished?</summary>
+        <div class="a">
+          <p>No. It works — notes, media, threads, tips, Tor mode and history backup are all built
+            and used daily — but it is pre-release software without packaged installers, and
+            anonymous mode in particular is experimental. Treat it as something to try, not
+            somewhere to put your only copy of anything.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Are my notes private?</summary>
+        <div class="a">
+          <p>Your notes are public and signed, the same as on any Nostr client. Anyone can read
+            them and verify they came from your key. That is the point of the format.</p>
+          <p>What Nosdag protects is different: anonymous mode hides your IP and location from
+            relays and peers, Monero keeps payment amounts and addresses off a public ledger, and
+            direct messages are encrypted. If you need the <em>content</em> of a note to be
+            private, do not post it.</p>
+        </div>
+      </details>
+      <details>
+        <summary>What happens to my notes when my computer is off?</summary>
+        <div class="a">
+          <p>Someone has to be holding a copy. Your node serves your data, so when it is off, your
+            media can stop resolving for other people.</p>
+          <p>Three answers ship in the app: link a pinning service so a copy stays online, let the
+            people who follow you host your account on their nodes, or accept that you are only
+            reachable while you are running. Nosdag shows you which of these is true rather than
+            implying your data is magically everywhere.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Is this a Nostr client, or something else?</summary>
+        <div class="a">
+          <p>Both. Nosdag speaks ordinary Nostr — you follow people on relays, your notes are
+            normal signed events, and other clients can read you. On top of that it keeps a
+            content-addressed copy of your history on IPFS and publishes a pointer to it, which is
+            what makes the chain in the hero above possible.</p>
+          <p>You keep the same npub you already have. Bring your key with you.</p>
+        </div>
+      </details>
+      <details>
+        <summary>What if I lose my key?</summary>
+        <div class="a">
+          <p>Then the account is gone. There is no reset, no support address, no recovery — your
+            private key <em>is</em> the account, and nobody else has it, which is the whole
+            arrangement. Export it from Settings the first time you open the app and keep it
+            somewhere offline.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Can I use my own Tor router instead of the bundled Tor?</summary>
+        <div class="a">
+          <p>Yes. On the Anonymous Mode page, point Nosdag at any running SOCKS proxy — a tor
+            router, a Whonix-style gateway, or system tor — and it uses that instead of starting
+            its own.</p>
+          <p>One trade-off: without control over that Tor instance the app cannot publish an onion
+            service, so it can read the network but nobody can fetch your notes and media directly
+            from your node while that setting is on. The app tells you this on the same page.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Why Monero rather than Bitcoin or Lightning?</summary>
+        <div class="a">
+          <p>Because a tip on a public timeline is a public payment. Monero keeps the amount, the
+            sender, and the receiving address off a readable ledger by default, which fits a social
+            app better than a transparent chain does. Nosdag is Monero-only by design.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Which platforms does it run on?</summary>
+        <div class="a">
+          <p>It is an Electron app, so Linux, macOS, and Windows all work in principle from source
+            with Node 22+. Day-to-day development and testing happen on Linux, so that is the best
+            trodden path today. Packaged, signed builds for all three are the next milestone.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Does it interfere with an IPFS node I already run?</summary>
+        <div class="a">
+          <p>No. The bundled node uses its own ports — API <code>5201</code>, gateway
+            <code>8201</code>, swarm <code>4201</code> — specifically so it cannot collide with a
+            standard IPFS Desktop or Kubo installation.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Where is the code, and what is the licence?</summary>
+        <div class="a">
+          <p>Everything you run is in the
+            <a href="https://github.com/grahamonero/nosdag-pub">nosdag-pub repository</a>, MIT
+            licensed. Read it before you trust it with a key — that is a reasonable thing to expect
+            of software like this.</p>
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span class="mono">Nosdag</span>
+    <a href="https://github.com/grahamonero/nosdag-pub">Source</a>
+    <a href="https://github.com/grahamonero/nosdag-pub/releases">Releases</a>
+    <a href="https://github.com/grahamonero/nosdag-pub/blob/main/LICENSE">MIT licence</a>
+    <span class="sp">Nostr keys · IPFS · Monero</span>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var els = document.querySelectorAll('.rv');
+  if (!('IntersectionObserver' in window) ||
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    els.forEach(function(el){ el.classList.add('in'); });
+    return;
+  }
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+    });
+  }, { rootMargin: '0px 0px -8% 0px' });
+  els.forEach(function(el, i){ el.style.transitionDelay = Math.min(i % 4, 3) * 60 + 'ms'; io.observe(el); });
+})();
+</script>
+</body>
+</html>
