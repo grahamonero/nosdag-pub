@@ -254,7 +254,7 @@ footer .sp{margin-left:auto}
         your relays, your notes readable in every other client — and adds an IPFS node inside the
         app so the data itself lives on your machine instead of somebody's server.</p>
       <div class="cta">
-        <a class="btn" href="#download">Download for Linux</a>
+        <a class="btn" href="#download">Download for Linux and Mac</a>
         <a class="btn btn-quiet" href="#run">Or run from source</a>
       </div>
     </div>
@@ -338,11 +338,10 @@ footer .sp{margin-left:auto}
   <div class="wrap">
     <div class="sec-head rv">
       <p class="micro">Download</p>
-      <h2>Linux builds, version 0.1.1</h2>
-      <p>Pick whichever suits your system. All three are the same app, x86_64, and nothing is
-        code-signed yet — your desktop may warn you about an unknown publisher. On macOS or
-        Windows, <a href="#run">run it from source</a> instead — there are no packaged builds
-        for those yet.</p>
+      <h2>Linux and Mac builds, version 0.1.1</h2>
+      <p>Pick whichever suits your system. They are all the same app, and nothing is code-signed
+        yet — your system will warn about an unknown publisher. On Windows there's an untested
+        zip below, and <a href="#run">running from source</a> works on any OS.</p>
     </div>
 
     <div class="cards">
@@ -374,6 +373,17 @@ footer .sp{margin-left:auto}
           <a href="https://github.com/grahamonero/nosdag-pub/releases/download/v0.1.1/SHA256SUMS.txt">SHA256SUMS.txt</a>:
           <span class="mono">sha256sum -c SHA256SUMS.txt --ignore-missing</span></p>
       </div>
+      <div class="card rv">
+        <p class="micro">Mac</p>
+        <h3>macOS .dmg</h3>
+        <p>Tested on Apple Silicon. Open the DMG and drag Nosdag to Applications.</p>
+        <p style="margin-top:14px"><a class="btn" href="https://github.com/grahamonero/nosdag-pub/releases/download/v0.1.1/Nosdag-0.1.1-arm64.dmg">Download for Apple Silicon</a>
+          <a class="btn btn-quiet" href="https://github.com/grahamonero/nosdag-pub/releases/download/v0.1.1/Nosdag-0.1.1-x64.dmg">Intel (untested)</a></p>
+<pre style="margin-top:14px">xattr -cr /Applications/Nosdag.app</pre>
+        <p style="margin-top:10px; font-size:14px">Nosdag isn't notarized with Apple yet, so macOS
+          refuses the first launch. The command above clears the quarantine once — or let it block,
+          then approve it under System Settings → Privacy &amp; Security.</p>
+      </div>
     </div>
 
     <div class="callout rv">
@@ -404,11 +414,11 @@ footer .sp{margin-left:auto}
   <div class="wrap">
     <div class="sec-head rv">
       <p class="micro">Or run from source</p>
-      <h2>From source — the way in on macOS and Windows</h2>
-      <p>There are no packaged builds for macOS or Windows yet, so this is how you run Nosdag
-        there. It also suits anyone who would rather read the code first, or is on a distro the
-        Linux builds don't fit. Steps 2 to 4 are identical on every system; only installing Node
-        differs.</p>
+      <h2>From source — works on any OS</h2>
+      <p>Four commands, the same on Linux, macOS and Windows. It suits anyone who would rather
+        read the code first, wants Nosdag on Windows without gambling on the untested zip, or is
+        on a distro the Linux builds don't fit. Steps 2 to 4 are identical on every system; only
+        installing Node differs.</p>
     </div>
 
     <ol class="steps">
@@ -472,11 +482,12 @@ $env:TOR_BIN="C:\path\to\tor.exe"; npm start</pre>
     </div>
 
     <div class="callout rv">
-      <strong>Untested on macOS and Windows.</strong>
-      <p>Nosdag is an Electron app, so these steps should work on both — but development and
-        testing happen on Linux, and nobody has yet confirmed a clean run on either. If you try
-        it, an <a href="https://github.com/grahamonero/nosdag-pub/issues">issue report</a> either
-        way is genuinely useful.</p>
+      <strong>Untested on Windows.</strong>
+      <p>Nosdag is an Electron app, so these steps should work there too — macOS is confirmed on
+        Apple Silicon — but development happens on Linux, and nobody has yet reported a clean run
+        on Windows. If you try it, an
+        <a href="https://github.com/grahamonero/nosdag-pub/issues">issue report</a> either way is
+        genuinely useful.</p>
     </div>
   </div>
 </section>
@@ -497,7 +508,7 @@ $env:TOR_BIN="C:\path\to\tor.exe"; npm start</pre>
         <summary>Is Nosdag finished?</summary>
         <div class="a">
           <p>No. It works — notes, media, threads, tips, Tor mode and history backup are all built
-            and used daily — but it is pre-release software: Linux builds only, nothing code-signed,
+            and used daily — but it is pre-release software: Linux and Mac builds, nothing code-signed,
             no auto-updates, and anonymous mode in particular is experimental. Treat it as something to try, not
             somewhere to put your only copy of anything.</p>
         </div>
@@ -505,9 +516,10 @@ $env:TOR_BIN="C:\path\to\tor.exe"; npm start</pre>
       <details>
         <summary>Which platforms does it run on?</summary>
         <div class="a">
-          <p>It is an Electron app, so Linux, macOS, and Windows all work in principle from source
-            with Node 22+. Day-to-day development and testing happen on Linux, so that is the best
-            trodden path today. Packaged, signed builds for all three are the next milestone.</p>
+          <p>Packaged builds exist for Linux (tested) and macOS — Apple Silicon is tested, Intel
+            isn't — plus an untested Windows zip. From source, all three work with Node 22+;
+            day-to-day development happens on Linux, so that is the best-trodden path. Signed
+            installers and auto-updates are the next milestone.</p>
         </div>
       </details>
       <details>
