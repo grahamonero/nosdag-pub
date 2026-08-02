@@ -5569,7 +5569,10 @@ export async function sendReplyToCurrentPost() {
 // Media upload configuration
 const mediaUploadConfig = {
     uploadUrl: 'https://nostr.build/api/v2/upload/files',
-    maxFileSize: 50 * 1024 * 1024, // 50MB for nostr.build
+    // Video streams from disk into the local IPFS node — no size cap. Images still ride the
+    // buffered canvas-strip path, so only they keep a bound. (Keep in sync with the panel
+    // composer's check in right-panel.js.)
+    maxImageSize: 500 * 1024 * 1024,
     supportedTypes: ['image/', 'video/', 'audio/'],
     uploadTimeout: 60000 // 60 seconds
 };
@@ -5588,8 +5591,8 @@ export function handleMediaUpload(input, context) {
             Utils.showNotification(`${file.name}: not an image or video — skipped`, 'error');
             continue;
         }
-        if (file.size > mediaUploadConfig.maxFileSize) {
-            const maxSizeMB = mediaUploadConfig.maxFileSize / (1024 * 1024);
+        if (file.type.startsWith('image/') && file.size > mediaUploadConfig.maxImageSize) {
+            const maxSizeMB = mediaUploadConfig.maxImageSize / (1024 * 1024);
             Utils.showNotification(`${file.name}: larger than ${maxSizeMB}MB — skipped`, 'error');
             continue;
         }

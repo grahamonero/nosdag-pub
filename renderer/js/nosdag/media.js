@@ -38,34 +38,8 @@ function extForFile (file) {
   return 'jpg' // sensible default
 }
 
-/**
- * Add a File/Blob to the local IPFS node and return a portable note reference.
- * @returns {Promise<string>} e.g. `ipfs://bafy…#media.jpg`
- * @throws if the bridge is missing or the add fails — the caller blocks the post (no HTTP fallback).
- */
-export async function addFileToIpfs (file) {
-  if (!inNosdagShell()) throw new Error('not in Nosdag shell')
-  // strip EXIF/GPS the same way the HTTP path does (reuse the lifted Nosmero util).
-  let toAdd = file
-  try { if (window.NostrUtils?.stripImageMetadata) toAdd = await window.NostrUtils.stripImageMetadata(file) } catch { /* fail-open */ }
-
-  let bytes = new Uint8Array(await toAdd.arrayBuffer())
-  let ext = extForFile(toAdd)
-
-  // Video runs through main before the add: GPS/device/timestamp metadata stripped (the
-  // canvas path above covers images only), and phone-camera HEVC transcoded to H.264 so
-  // other people's players can actually decode it. An undecodable codec with no ffmpeg on
-  // the machine throws — the caller blocks the note, same as the IPFS-or-fail rule.
-  const isVideo = /^video\//i.test(toAdd.type || '') || /\.(mov|mp4|m4v|webm|ogg|3gp)$/i.test(file.name || '')
-  if (isVideo && window.nosdag?.kubo?.prepareMedia) {
-    const prep = await window.nosdag.kubo.prepareMedia({ bytes, name: file.name || '', type: toAdd.type || '' })
-    if (prep?.error) throw new Error(prep.error)
-    if (prep?.bytes) bytes = prep.bytes instanceof Uint8Array ? prep.bytes : new Uint8Array(prep.bytes)
-    if (prep?.ext) ext = prep.ext
-    if (prep?.converted) window.NostrUtils?.showNotification?.('Video converted to H.264 for compatibility', 'info')
-  }
-
-  const res = await window.nosdag.kubo.addMedia(bytes)
+// Shared tail of both add routes: shape the IPC result into a note reference or a clear error.
+function finishAdd (res, ext) {
   if (!res || res.error || !res.cid) {
     const detail = res?.error || 'addMedia returned no CID'
     // IPFS-or-fail (no centralized HTTP fallback): surface a clear, actionable message instead.
@@ -76,8 +50,57 @@ export async function addFileToIpfs (file) {
     }
     throw new Error('Could not add media to your IPFS node: ' + detail)
   }
-
   return `ipfs://${res.cid}#media.${ext}`
+}
+
+/**
+ * Add a File/Blob to the local IPFS node and return a portable note reference.
+ * @returns {Promise<string>} e.g. `ipfs://bafy…#media.jpg`
+ * @throws if the bridge is missing or the add fails — the caller blocks the post (no HTTP fallback).
+ */
+export async function addFileToIpfs (file) {
+  if (!inNosdagShell()) throw new Error('not in Nosdag shell')
+
+  // Video runs through main before the add: GPS/device/timestamp metadata stripped (the
+  // renderer's canvas path covers images only), and phone-camera HEVC transcoded to H.264 so
+  // other people's players can actually decode it. An undecodable codec with no ffmpeg on
+  // the machine throws — the caller blocks the note, same as the IPFS-or-fail rule.
+  const isVideo = /^video\//i.test(file.type || '') || /\.(mov|mp4|m4v|webm|ogg|3gp)$/i.test(file.name || '')
+
+  // A picked video streams by its OS path: only the path crosses IPC, prep + add run
+  // file→file in main, so video size has no practical limit. Pasted/blob-backed files
+  // have no path and fall through to the buffered route below.
+  const kubo = window.nosdag.kubo
+  if (isVideo && kubo.pathForFile && kubo.prepareMediaFile && kubo.addMediaFromPath) {
+    const fsPath = kubo.pathForFile(file)
+    if (fsPath) {
+      let ext = extForFile(file)
+      if (file.size > 100 * 1024 * 1024) window.NostrUtils?.showNotification?.('Preparing video — a large or HEVC file can take a while', 'info')
+      const prep = await kubo.prepareMediaFile({ path: fsPath, name: file.name || '', type: file.type || '' })
+      if (prep?.error) throw new Error(prep.error)
+      if (prep?.ext) ext = prep.ext
+      if (prep?.converted) window.NostrUtils?.showNotification?.('Video converted to H.264 for compatibility', 'info')
+      return finishAdd(await kubo.addMediaFromPath({ path: prep.path }), ext)
+    }
+  }
+
+  // Buffered route — images (canvas strip needs the bytes here) and pathless video.
+  // strip EXIF/GPS the same way the HTTP path does (reuse the lifted Nosmero util).
+  let toAdd = file
+  try { if (window.NostrUtils?.stripImageMetadata) toAdd = await window.NostrUtils.stripImageMetadata(file) } catch { /* fail-open */ }
+
+  let bytes = new Uint8Array(await toAdd.arrayBuffer())
+  let ext = extForFile(toAdd)
+
+  if (isVideo && kubo.prepareMedia) {
+    const prep = await kubo.prepareMedia({ bytes, name: file.name || '', type: toAdd.type || '' })
+    if (prep?.error) throw new Error(prep.error)
+    if (prep?.bytes) bytes = prep.bytes instanceof Uint8Array ? prep.bytes : new Uint8Array(prep.bytes)
+    if (prep?.ext) ext = prep.ext
+    if (prep?.converted) window.NostrUtils?.showNotification?.('Video converted to H.264 for compatibility', 'info')
+  }
+
+  return finishAdd(await kubo.addMedia(bytes), ext)
 }
 
 /**

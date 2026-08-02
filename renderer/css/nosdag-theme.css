@@ -168,8 +168,13 @@ body::before{ content:none; }
 }
 .messages-page{ height:100%; }
 
-/* feed tabs sit at the top of the feed column (.main), sticky over the scroll */
+/* Feed tabs sit at the top of the feed column (.main), sticky over the scroll.
+   The !important display beats styles.css's ≤768px rule, which hid these when they
+   lived in the cramped top header — now they're the ONLY route to the other feeds
+   (the rail's Feeds group is gone), so hiding them would strand the user on Following. */
 .feed-selector{
+  display:flex !important;
+  flex-wrap:wrap;
   position:sticky; top:0; z-index:15;
   background:var(--nd-ground);
   padding:10px 16px;

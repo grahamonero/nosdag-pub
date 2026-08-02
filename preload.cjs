@@ -2,7 +2,7 @@
 // CommonJS (.cjs) because sandboxed preloads must be CJS. Exposes a tiny, explicit surface;
 // the renderer never touches Node, Kubo, or ipcRenderer directly.
 
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 // Per-launch capability token for main's loopback listeners (ws-tor-bridge + monero-relay), delivered
 // via webPreferences.additionalArguments so it's readable synchronously here — before any renderer
@@ -80,6 +80,12 @@ contextBridge.exposeInMainWorld('nosdag', {
     addMedia: (bytes) => ipcRenderer.invoke('kubo:addMedia', bytes),         // Uint8Array → { cid } | { error }
     // video attachment prep (strip GPS/device metadata; transcode HEVC → H.264) — run before addMedia
     prepareMedia: (p) => ipcRenderer.invoke('media:prepare', p),             // { bytes, name, type } → { bytes, ext?, converted?, stripped? } | { error }
+    // Path-based twins — the no-size-limit route for picked files: the OS path crosses IPC
+    // instead of the bytes, prep + add stream from disk in main. Pasted/blob files have no
+    // path (pathForFile returns '') and stay on the buffered pair above.
+    pathForFile: (file) => { try { return webUtils.getPathForFile(file) || '' } catch { return '' } },
+    prepareMediaFile: (p) => ipcRenderer.invoke('media:prepareFile', p),     // { path, name, type } → { path, ext?, converted?, stripped? } | { error }
+    addMediaFromPath: (p) => ipcRenderer.invoke('kubo:addMediaFromPath', p), // { path } → { cid } | { error } (path must come from prepareMediaFile)
     pinRecursive: (cid, timeoutMs) => ipcRenderer.invoke('kubo:pinRecursive', cid, timeoutMs), // (cidStr, timeoutMs?) → { ok } | { error:'timeout'|… }
     unpinRecursive: (cid) => ipcRenderer.invoke('kubo:unpinRecursive', cid), // cidStr → { ok } | { error }
     isPinned: (cid) => ipcRenderer.invoke('kubo:isPinned', cid),             // cidStr → { pinned: bool|null } | { error }

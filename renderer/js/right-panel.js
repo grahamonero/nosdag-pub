@@ -2597,9 +2597,10 @@ const RightPanel = {
                 window.NostrUtils?.showNotification?.(`${file.name}: not an image or video — skipped`, 'error');
                 continue;
             }
-            // 50MB max for nostr.build
-            if (file.size > 50 * 1024 * 1024) {
-                window.NostrUtils?.showNotification?.(`${file.name}: larger than 50MB — skipped`, 'error');
+            // Video streams from disk (no size cap); images ride the buffered canvas-strip
+            // path so only they keep a bound (matches posts.js maxImageSize).
+            if (file.type.startsWith('image/') && file.size > 500 * 1024 * 1024) {
+                window.NostrUtils?.showNotification?.(`${file.name}: larger than 500MB — skipped`, 'error');
                 continue;
             }
             if (this.currentPanelMedia.length >= this.maxPanelMedia) {

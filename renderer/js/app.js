@@ -4615,12 +4615,38 @@ async function saveSettings() {
     }
 
     try {
-        const currentProfile = State.profileCache[State.publicKey] || {};
-        console.log('💾 Saving settings with current profile:', currentProfile);
-
         const bannerImage = document.getElementById('defaultBannerImage').value.trim();
         const moneroAddress = document.getElementById('defaultMoneroAddress').value.trim();
 
+        // The publish base must be the LIVE kind 0, not the in-memory cache. The cache can
+        // lag the relays badly (fresh install, Tor posture, an edit made from another
+        // client), and re-signing stale fields with a fresh created_at silently reverts the
+        // user's newest profile everywhere — kind 0 is replaceable, newest timestamp wins.
+        let currentProfile = State.profileCache[State.publicKey] || {};
+        try {
+            const relaySet = [...new Set([...(await Relays.getReadRelays()), ...(await Relays.getWriteRelays())])];
+            const live = await Promise.race([
+                State.pool.querySync(relaySet, { kinds: [0], authors: [State.publicKey] }),
+                new Promise(resolve => setTimeout(() => resolve(null), 10000))
+            ]);
+            const newest = (live || []).reduce((a, b) => (!a || b.created_at > a.created_at) ? b : a, null);
+            if (newest && newest.created_at > (currentProfile.created_at || 0)) {
+                currentProfile = { ...JSON.parse(newest.content), pubkey: State.publicKey, created_at: newest.created_at };
+                saveProfileToCache(State.publicKey, currentProfile);
+            }
+        } catch (e) {
+            console.warn('Live profile fetch before save failed — falling back to the cached copy:', e?.message || e);
+        }
+
+        // The only profile field Settings can change is the banner. When it hasn't changed,
+        // leave kind 0 alone entirely — republishing “preserved” fields under a new
+        // timestamp is exactly how a stale cache clobbers a newer profile.
+        const originalBanner = currentProfile.banner || '';
+        const bannerChanged = bannerImage !== originalBanner;
+
+        if (!bannerChanged) {
+            console.log('🖼️ Banner unchanged — skipping the kind-0 publish');
+        } else {
         // PRESERVE ALL EXISTING PROFILE FIELDS
         const profileData = {
             ...currentProfile
@@ -4630,20 +4656,10 @@ async function saveSettings() {
         delete profileData.created_at;
         delete profileData.monero_address;  // Monero address goes to NIP-78 relay, not kind 0 profile
 
-        console.log('🔍 Original Banner:', currentProfile.banner || 'None');
-        console.log('🔍 New Banner from form:', bannerImage || 'Empty');
-
-        // Only update Banner image if user actually changed it
-        const originalBanner = currentProfile.banner || '';
-        if (bannerImage !== originalBanner) {
-            console.log('🖼️ Banner image changed, updating...');
-            if (bannerImage) {
-                profileData.banner = bannerImage;
-            } else {
-                delete profileData.banner;
-            }
+        if (bannerImage) {
+            profileData.banner = bannerImage;
         } else {
-            console.log('🖼️ Banner image unchanged, preserving existing value');
+            delete profileData.banner;
         }
 
         console.log('📤 Profile data to save:', profileData);
@@ -4705,6 +4721,7 @@ async function saveSettings() {
             pubkey: State.publicKey,
             created_at: signedProfileEvent.created_at
         });
+        } // bannerChanged — kind 0 untouched on every other Settings save
 
         if (moneroAddress) {
             await saveMoneroAddressToRelays(moneroAddress);

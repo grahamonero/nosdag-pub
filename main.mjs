@@ -16,7 +16,8 @@ import { connectKubo } from './lib/kubo-manager.mjs'
 import { TorProcess } from './lib/tor-process.mjs'
 import { createTorNode } from './lib/tor-node.mjs'
 import { exportDeltaCar, exportMissingCar, exportClosureCar, importCar, MAX_SAFE_BLOCK_BYTES } from './lib/migrate.mjs'
-import { sniffVideo, needsTranscode, stripIsoBmffMetadata, resolveFfmpeg, ffmpegStrip } from './lib/media-transcode.mjs'
+import { startMediaGateway } from './lib/media-gateway.mjs'
+import { sniffVideo, needsTranscode, stripIsoBmffMetadata, resolveFfmpeg, ffmpegStrip, sniffVideoFile, stripIsoBmffMetadataFile, ffmpegStripFile, transcodeTimeoutMs } from './lib/media-transcode.mjs'
 import { openHeliaReader, openKuboReader } from './lib/store-reader.mjs'
 import { scanBackupCar, chainContains } from './lib/history-backup.mjs'
 import { createMoneroRelay } from './lib/monero-relay.mjs'
@@ -50,6 +51,12 @@ let switching = false  // a mode switch is in flight (teardown + boot of the oth
 let sidecar = null     // KuboSidecar — owns the clearnet daemon process
 let torProc = null     // TorProcess — owns the tor daemon (anonymous mode)
 let torGateway = null  // http.Server serving IPFS media from the Helia node in Tor mode
+// Paths issued by media:prepareFile, consumable by kubo:addMediaFromPath (which refuses
+// anything else). temp:true entries are main-owned temp files, removed after the add or at exit.
+const preparedMedia = new Map() // absolute path → { temp: boolean }
+// Dev harness only: holds smoke-views.mjs once loaded (absent from public/packaged builds —
+// NOSDAG_SMOKE behaviors all key off this, never off the env var directly).
+let smokeDriver = null
 let kubo = null        // the ACTIVE storage node surface (Kubo or Helia-over-Tor) — IPC calls this
 let win = null
 let cleanShutdown = false
@@ -115,6 +122,8 @@ const hardKill = () => {
   try { sidecar?.killNowSync?.() } catch { /* exiting anyway */ }
   try { torProc?.killNowSync?.() } catch { /* exiting anyway */ }
   try { torGateway?.close?.() } catch { /* exiting anyway */ }
+  for (const [p, e] of preparedMedia) { if (e.temp) { try { fs.rmSync(p, { force: true }) } catch { /* exiting anyway */ } } }
+  preparedMedia.clear()
 }
 process.on('exit', hardKill)
 process.on('SIGINT', () => { hardKill(); process.exit(0) })
@@ -836,6 +845,69 @@ function setupIpc () {
       return { bytes: buf }
     } catch (e) { return { error: String(e?.message || e) } }
   })
+  // Path-based twins of media:prepare + kubo:addMedia — the no-size-limit route. The renderer
+  // hands over the picked file's OS path (webUtils.getPathForFile) instead of its bytes, so
+  // the file never crosses IPC and never lands in memory whole: sniff/strip walk the file by
+  // fd (only the small moov index is buffered), ffmpeg runs file→file, and the add streams
+  // from disk into the node. addMediaFromPath only accepts paths this handler issued —
+  // everything publishable is funneled through the video gate here, and temp cleanup stays
+  // main's job. The buffered pair above remains for images and pathless (pasted/blob) files.
+  ipcMain.handle('media:prepareFile', async (_e, { path: srcPath, name = '', type = '' } = {}) => {
+    try {
+      if (typeof srcPath !== 'string' || !srcPath) return { error: 'no file path' }
+      const st = await fs.promises.stat(srcPath).catch(() => null)
+      if (!st?.isFile() || !st.size) return { error: 'file missing or empty' }
+      const register = (p, temp) => { preparedMedia.set(p, { temp }); return p }
+      const looksVideo = /^video\//i.test(type) || /\.(mov|mp4|m4v|webm|ogg|3gp)$/i.test(name || srcPath)
+      if (!looksVideo) return { path: register(srcPath, false) }
+      const sniff = await sniffVideoFile(srcPath)
+      const stamp = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+      const outFor = (ext) => path.join(app.getPath('temp'), `nosdag-media-out-${stamp}.${ext}`)
+      if (sniff.container === 'iso-bmff') {
+        if (needsTranscode(sniff.videoCodecs)) {
+          const ffmpegBin = resolveFfmpeg()
+          if (!ffmpegBin) {
+            const codecs = [...sniff.videoCodecs].join('/') || 'an unknown codec'
+            return { error: `This video uses ${codecs}, which most viewers can't play. Install ffmpeg (e.g. sudo apt install ffmpeg) so Nosdag can convert it to H.264, or attach an H.264 export instead.` }
+          }
+          const outPath = outFor('mp4')
+          try {
+            await ffmpegStripFile({ ffmpegBin, inPath: srcPath, outPath, reencode: true, timeoutMs: transcodeTimeoutMs(st.size) })
+          } catch (err) { fs.promises.rm(outPath, { force: true }).catch(() => {}); throw err }
+          return { path: register(outPath, true), ext: 'mp4', converted: true, stripped: true }
+        }
+        const outPath = outFor('mp4')
+        try { await stripIsoBmffMetadataFile(srcPath, outPath) } catch (err) { fs.promises.rm(outPath, { force: true }).catch(() => {}); throw err }
+        return { path: register(outPath, true), stripped: true }
+      }
+      if (sniff.container === 'webm' || sniff.container === 'ogg') {
+        const ffmpegBin = resolveFfmpeg()
+        if (ffmpegBin) {
+          const outPath = outFor(sniff.container)
+          try {
+            await ffmpegStripFile({ ffmpegBin, inPath: srcPath, outPath, reencode: false, format: sniff.container, timeoutMs: transcodeTimeoutMs(st.size) })
+          } catch (err) { fs.promises.rm(outPath, { force: true }).catch(() => {}); throw err }
+          return { path: register(outPath, true), stripped: true }
+        }
+        console.warn('[media] no ffmpeg — %s attachment published with its container metadata', sniff.container)
+      }
+      return { path: register(srcPath, false) }
+    } catch (e) { return { error: String(e?.message || e) } }
+  })
+  ipcMain.handle('kubo:addMediaFromPath', async (_e, { path: mediaPath } = {}) => {
+    if (!kubo) return { error: 'node not ready' }
+    const entry = preparedMedia.get(mediaPath)
+    if (!entry) return { error: 'unprepared media path — run media:prepareFile first' }
+    try {
+      const cid = await kubo.addFromPath(mediaPath)
+      return { cid: cid.toString() }
+    } catch (e) {
+      return { error: String(e?.message || e) }
+    } finally {
+      preparedMedia.delete(mediaPath)
+      if (entry.temp) fs.promises.rm(mediaPath, { force: true }).catch(() => {})
+    }
+  })
   ipcMain.handle('kubo:pinRecursive', async (_e, cidStr, timeoutMs) => {
     if (!kubo) return { error: 'node not ready' }
     try {
@@ -1060,7 +1132,7 @@ function setupIpc () {
     if (historyBusy()) return { error: 'the node is busy with another sync — try again shortly' }
     // M3: only the smoke harness may name an absolute path; a real renderer (post-XSS) must go
     // through the OS save dialog so it can't write a CAR to an arbitrary location.
-    let carPath = process.env.NOSDAG_SMOKE ? toPath : null
+    let carPath = smokeDriver ? toPath : null
     if (!carPath) {
       const picked = await dialog.showSaveDialog(win, {
         title: 'Export my note history',
@@ -1096,7 +1168,7 @@ function setupIpc () {
     if (!kubo) return { error: 'node not ready' }
     if (historyBusy()) return { error: 'the node is busy with another sync — try again shortly' }
     // M3: smoke-only absolute path; a real renderer goes through the OS open dialog (read scope).
-    let carPath = process.env.NOSDAG_SMOKE ? fromPath : null
+    let carPath = smokeDriver ? fromPath : null
     if (!carPath) {
       const picked = await dialog.showOpenDialog(win, {
         title: 'Restore note history from a backup',
@@ -1357,32 +1429,8 @@ async function startClearnet () {
 }
 
 // Sniff an image content-type from magic bytes so <img> renders gateway-served media in Tor mode.
-function sniffMime (b) {
-  if (b.length > 8 && b[0] === 0x89 && b[1] === 0x50) return 'image/png'
-  if (b.length > 3 && b[0] === 0xff && b[1] === 0xd8) return 'image/jpeg'
-  if (b.length > 4 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif'
-  if (b.length > 12 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp'
-  return 'application/octet-stream'
-}
-
-// Minimal local gateway for Tor mode: the renderer fetches ipfs media at 127.0.0.1:8201/ipfs/<cid>
-// (the same gateway URL as the Kubo path). Kubo is stopped in Tor mode, so we serve the bytes from the
-// Helia node here. catBytes reassembles both media shapes — legacy raw single blocks and chunked
-// UnixFS dag-pb files — buffered whole per request (bounded by the composer's attachment cap).
-function startTorGateway (node, port) {
-  const server = http.createServer(async (req, res) => {
-    const m = (req.url || '').match(/^\/ipfs\/([^/?#]+)/)
-    if (!m) { res.writeHead(404); res.end('not found'); return }
-    try {
-      const bytes = Buffer.from(await node.catBytes(m[1]))
-      res.writeHead(200, { 'content-type': sniffMime(bytes), 'access-control-allow-origin': '*', 'cache-control': 'public, max-age=31536000, immutable' })
-      res.end(bytes)
-    } catch { res.writeHead(502); res.end('media unavailable') }
-  })
-  server.on('error', (e) => console.error('[tor-gw]', e?.message || e))
-  server.listen(port, '127.0.0.1')
-  return server
-}
+// The Tor-mode local media gateway lives in lib/media-gateway.mjs — it streams from the
+// Helia node with Range support, so media of any size serves in bounded memory.
 
 // --- Anonymous posture: tor + a Helia node whose only transport dials .onion over Tor ---
 async function startTorMode () {
@@ -1403,7 +1451,7 @@ async function startTorMode () {
     socksPort: TOR_SOCKS_PORT,
     announce: onion
   })
-  torGateway = startTorGateway(kubo, TOR_GATEWAY_PORT)
+  torGateway = startMediaGateway(kubo, TOR_GATEWAY_PORT)
   // Route the RENDERER's clearnet traffic (relays, search, media, wallet, DNS) over Tor too, so a
   // relay or the backend can't see your real IP next to your pubkey. Loopback (the gateway) stays direct.
   await applyTorProxy()
@@ -1425,7 +1473,7 @@ async function startTorModeExternal (dataDir) {
     socksHost: torProxy.host,
     announce: null // outbound-capable, inbound-invisible
   })
-  torGateway = startTorGateway(kubo, TOR_GATEWAY_PORT)
+  torGateway = startMediaGateway(kubo, TOR_GATEWAY_PORT)
   await applyTorProxy()
   startTorProxyWatch() // the daemon isn't ours to supervise — poll reachability instead (H2 degraded)
   console.log(`[tor] anonymous node up via external proxy ${torProxy.host}:${torProxy.port} — outbound-only, peer ${(await kubo.id()).id}`)
@@ -1480,7 +1528,7 @@ async function startNode () {
       : (mode === 'tor' && /did not reach 100%/i.test(msg))
         ? { kind: 'tor-timeout', message: 'Tor didn’t finish connecting in time. A first bootstrap can be slow — Tor saves its progress, so retrying usually completes.', detail: msg }
         : (mode === 'tor' && /could not start tor|TOR_BIN|tor \(/i.test(msg))
-          ? { kind: 'no-tor', message: 'Anonymous mode needs Tor, which isn’t installed or couldn’t be found. Install Tor (or the Tor Expert Bundle), then start Nosdag with TOR_BIN=/path/to/tor. Clearnet mode works without it.' }
+          ? { kind: 'no-tor', message: 'Anonymous mode needs Tor, which couldn’t be found. Install it (macOS: brew install tor · Debian/Ubuntu: sudo apt install tor) and retry — or point TOR_BIN at a tor binary. Clearnet mode works without it.' }
           : { kind: 'failed', message: msg }
     throw e
   }
@@ -1617,7 +1665,7 @@ async function createWindow (startUrl = 'app://bundle/index.html') {
   // (relay names, note ids) and a terminal launch shouldn't transcribe them by default.
   // Electron 35+ passes a single ConsoleMessageEvent (message/level/lineNumber/sourceId) — the old
   // (event, level, message, …) positional signature was removed.
-  if (process.env.NOSDAG_SMOKE || process.env.NOSDAG_DEBUG) {
+  if (smokeDriver || process.env.NOSDAG_DEBUG) {
     win.webContents.on('console-message', (e, level, message) => {
       // Electron's console-message moved its fields onto the event object (e.message); the dual form still
       // passes the text as the 3rd positional arg. Prefer e.message, fall back to the positional message —
@@ -1668,7 +1716,14 @@ app.whenReady().then(async () => {
     )
   }
   await wsTorBridge.start().catch((e) => console.error('[ws-bridge] start:', e?.message || e))
+  // Dev harness: the headless smoke driver lives in smoke-views.mjs, which ships in neither
+  // the public repo nor packaged builds (smoke-*.mjs is excluded from both) — every
+  // NOSDAG_SMOKE behavior keys off the loaded driver, so the env var is inert without it.
   if (process.env.NOSDAG_SMOKE) {
+    smokeDriver = await import('./smoke-views.mjs').then((m) => m, () => null)
+    if (!smokeDriver) console.log('[smoke] this build carries no smoke driver — NOSDAG_SMOKE ignored')
+  }
+  if (smokeDriver) {
     // Smokes boot straight to the app on clearnet (deterministic; tests that need Tor switch
     // themselves) — and a prior Tor-mode run can never leak its posture into the next test.
     mode = 'clearnet'
@@ -1688,1113 +1743,8 @@ app.whenReady().then(async () => {
     }
   })
   // Headless CI smoke: boot, optionally navigate to a view, screenshot it, then quit.
-  if (process.env.NOSDAG_SMOKE) {
-    const view = process.env.NOSDAG_SMOKE_VIEW // e.g. 'node'; default = feed
-    setTimeout(async () => {
-      try {
-        if (view === 'clicktest') {
-          // Click-routing regression: a username click in a feed card must open the
-          // right-panel profile and must NOT open the thread.
-          await new Promise((r) => setTimeout(r, 5000)) // let the feed render
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const spy = { thread: null, profile: null };
-            const origT = window.openThreadView;
-            window.openThreadView = (id) => { spy.thread = id; return origT?.(id); };
-            const RP = window.RightPanel;
-            const origP = RP?.openProfile?.bind(RP);
-            if (RP) RP.openProfile = (pk, u) => { spy.profile = pk; return origP?.(pk, u); };
-            // Prefer a parent-preview username (the historical gap); fall back to a main header one.
-            const el = document.querySelector('.parent-post .username') || document.querySelector('.post .username');
-            if (!el) return 'CLICKTEST FAIL | no .username in feed';
-            const which = el.closest('.parent-post') ? 'parent-preview' : 'header';
-            el.click();
-            await new Promise(r => setTimeout(r, 2500));
-            const profileActive = !!document.querySelector('#rightPanelContent .right-panel-profile.active');
-            const ok = !spy.thread && !!spy.profile && profileActive;
-            return 'CLICKTEST ' + (ok ? 'PASS' : 'FAIL') + ' | clicked=' + which + ' thread=' + spy.thread + ' profile=' + (spy.profile || '').slice(0, 8) + ' profileActive=' + profileActive;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'node') {
-          await win.webContents.executeJavaScript('window.loadNodePage && window.loadNodePage()').catch(() => {})
-          await new Promise((r) => setTimeout(r, 4500)) // let it render + poll the sidecar
-        } else if (view === 'hosted') {
-          await win.webContents.executeJavaScript('window.loadHostedFollowsPage && window.loadHostedFollowsPage()').catch(() => {})
-          await new Promise((r) => setTimeout(r, 4000))
-        } else if (view === 'concept') {
-          await win.loadURL('app://bundle/design/feed-concept.html')
-          await new Promise((r) => setTimeout(r, 1500))
-        } else if (view === 'dagtest') {
-          // Phase 2 round-trip: renderer → main → Kubo. Write a 2-post DAG and read it back,
-          // verifying the prev IPLD link survives the envelope.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const k = window.nosdag.kubo;
-            const ev1 = { id:'a1', pubkey:'pk', created_at:1, kind:1, tags:[], content:'phase2 post #1', sig:'s1' };
-            const r1 = await k.putPost({ event: ev1, prevCid: null });
-            if (r1.error) return 'putPost#1 ERR: ' + r1.error;
-            const ev2 = { id:'a2', pubkey:'pk', created_at:2, kind:1, tags:[['prev', r1.cid]], content:'phase2 post #2', sig:'s2' };
-            const r2 = await k.putPost({ event: ev2, prevCid: r1.cid });
-            if (r2.error) return 'putPost#2 ERR: ' + r2.error;
-            const back = await k.getPost(r2.cid);
-            if (back.error) return 'getPost ERR: ' + back.error;
-            const ok = back.event.content === 'phase2 post #2' && back.prev === r1.cid;
-            return 'DAGTEST ' + (ok ? 'PASS' : 'FAIL') + ' | head=' + r2.cid + ' | prev-link=' + back.prev + ' | content=' + JSON.stringify(back.event.content);
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'authtest') {
-          // Local-only username/password: signup writes a NIP-49 blob to localStorage, login
-          // decrypts it — no server. Round-trip + wrong-password + unknown-user + availability +
-          // no-plaintext-leak, against the real auth-client in the renderer.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const NT = window.NostrTools; if (!NT) return 'AUTHTEST FAIL | no NostrTools';
-            const A = await import('/js/auth/auth-client.js');
-            const sk = NT.generateSecretKey(); const pkhex = NT.getPublicKey(sk);
-            const nsec = NT.nip19.nsecEncode(sk); const npub = NT.nip19.npubEncode(pkhex);
-            const u = 'smoketest'; const pw = 'Str0ng-Passw0rd!2026';
-            try { localStorage.removeItem('nosdag:accounts'); } catch {}
-            await A.signup({ nsec, npub, password: pw, username: u });
-            const r = await A.login(u, pw);
-            const okLogin = r.nsec === nsec && r.npub === npub;
-            let wrongRej = false; try { await A.login(u, 'wrong-password'); } catch { wrongRej = true; }
-            let unknownRej = false; try { await A.login('nobody', pw); } catch { unknownRej = true; }
-            const taken = await A.checkAvailability('username', u);          // false (exists)
-            const free = await A.checkAvailability('username', 'someoneelse'); // true
-            const blob = localStorage.getItem('nosdag:accounts');
-            const noPlain = !!blob && blob.indexOf(nsec) === -1;             // ciphertext only, no nsec
-            // Local-only: a weak (short) password is ACCEPTED (warning, not a block); empty still rejected.
-            let weakOk = false; try { await A.signup({ nsec, npub, password: 'abc', username: 'weakuser' }); const rw = await A.login('weakuser', 'abc'); weakOk = rw.nsec === nsec; } catch { weakOk = false; }
-            let emptyRej = false; try { await A.signup({ nsec, npub, password: '', username: 'emptyuser' }); } catch { emptyRej = true; }
-            try { localStorage.removeItem('nosdag:accounts'); } catch {}
-            const ok = okLogin && wrongRej && unknownRej && taken === false && free === true && noPlain && weakOk && emptyRej;
-            return 'AUTHTEST ' + (ok ? 'PASS' : 'FAIL') + ' | login=' + okLogin + ' wrongRej=' + wrongRej + ' unknownRej=' + unknownRej + ' taken=' + (taken === false) + ' free=' + (free === true) + ' noPlain=' + noPlain + ' weakOk=' + weakOk + ' emptyRej=' + emptyRej;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'feedmark') {
-          // Phase 2 Step 4: only the user's OWN notes that are in their DAG get the IPFS chip.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const NT = window.NostrTools; if (!NT) return 'no NostrTools';
-            const M = await import('/js/nosdag/dag-publish.js');
-            const FM = await import('/js/nosdag/feed-marks.js');
-            const sk = NT.generateSecretKey(); const pk = NT.getPublicKey(sk);
-            try { localStorage.removeItem('nosdag:head:'+pk); localStorage.removeItem('nosdag:posts:'+pk); } catch {}
-            const sign = async (t) => NT.finalizeEvent({ created_at:1, content:'', ...t }, sk);
-            const noStore = { publish: () => {} };
-            const e1 = NT.finalizeEvent({ kind:1, created_at:1, tags:[['client','nosdag']], content:'feed mark #1' }, sk);
-            const h1 = await M.publishToDag({ signedEvent:e1, prevCid:null, pubkey:pk, signEvent:sign, pool:noStore, writeRelays:[] });
-            const e2 = NT.finalizeEvent({ kind:1, created_at:2, tags:[['client','nosdag'],['prev',h1]], content:'feed mark #2' }, sk);
-            await M.publishToDag({ signedEvent:e2, prevCid:h1, pubkey:pk, signEvent:sign, pool:noStore, writeRelays:[] });
-            const otherpk = '00'.repeat(32);
-            const c = document.createElement('div'); c.id = 'feedmarktest';
-            const card = (pub,id,client) => '<div class="post" data-pubkey="'+pub+'" data-post-id="'+id+'" data-client="'+(client||'')+'"><div class="post-header"><div class="post-info"></div></div></div>';
-            // e2 as a REPLY: a .parent-post (the quoted note) nested above the post's own header
-            const replyCard = (pub,id,client) => '<div class="post" data-pubkey="'+pub+'" data-post-id="'+id+'" data-client="'+(client||'')+'">'
-              + '<div class="parent-post"><div class="post-header"><div class="post-info"><span class="username">parent</span></div></div></div>'
-              + '<div class="post-header"><div class="post-info"><span class="username">me</span></div></div></div>';
-            c.innerHTML = card(pk, e1.id, 'nosdag')          // mine (in my DAG) → CID badge
-                        + replyCard(pk, e2.id, 'nosdag')      // mine + parent block → badge on own header
-                        + card(otherpk, 'beefnosdag', 'nosdag') // other author, client=nosdag → badge (read-from-IPFS)
-                        + card(otherpk, 'beefplain', '');     // other author, NOT nosdag → no badge
-            document.body.appendChild(c);
-            await FM.markIpfsNotes('feedmarktest', pk);
-            const chips = c.querySelectorAll('.nd-ipfs-chip').length;
-            const inParent = c.querySelector('.parent-post .nd-ipfs-chip') ? 1 : 0;
-            const plain = c.querySelector('.post[data-post-id="beefplain"] .nd-ipfs-chip') ? 1 : 0;
-            const otherNosdag = c.querySelector('.post[data-post-id="beefnosdag"] .nd-ipfs-chip') ? 1 : 0;
-            return 'FEEDMARK ' + (chips===3 && inParent===0 && plain===0 && otherNosdag===1 ? 'PASS' : 'FAIL') + ' | chips='+chips+' inParent='+inParent+' plain='+plain+' otherNosdag='+otherNosdag;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'readtest') {
-          // Phase 2 Step 3: write a 3-note chain, then walk it back from the head THROUGH THE
-          // IPFS (getPost per hop) and verify the notes reconstruct newest→oldest, sigs intact.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const NT = window.NostrTools; if (!NT) return 'no NostrTools';
-            const M = await import('/js/nosdag/dag-publish.js');
-            const R = await import('/js/nosdag/dag-read.js');
-            const sk = NT.generateSecretKey(); const pk = NT.getPublicKey(sk);
-            try { localStorage.removeItem('nosdag:head:'+pk); localStorage.removeItem('nosdag:posts:'+pk); } catch {}
-            const sign = async (t) => NT.finalizeEvent({ created_at:1, content:'', ...t }, sk);
-            const noStore = { publish: () => {} };
-            let prev = null;
-            for (let i=1;i<=3;i++) {
-              const tags = prev ? [['client','nosdag'],['prev',prev]] : [['client','nosdag']];
-              const ev = NT.finalizeEvent({ kind:1, created_at:i, tags, content:'read note #'+i }, sk);
-              prev = await M.publishToDag({ signedEvent:ev, prevCid:prev, pubkey:pk, signEvent:sign, pool:noStore, writeRelays:[] });
-            }
-            const head = M.getLocalHead(pk);
-            const notes = await R.walkNotes(head, {});
-            const ok = notes.length===3 && notes[0].content==='read note #3' && notes[2].content==='read note #1' && notes.every(n=>NT.verifyEvent(n));
-            return 'READTEST ' + (ok?'PASS':'FAIL') + ' | walked='+notes.length+' | newest='+notes[0]?.content+' | oldest='+notes[notes.length-1]?.content;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'ipfsnotesview') {
-          // Phase 2 Step 3 UI: write 3 notes, open the "notes from IPFS" modal, count cards.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const NT = window.NostrTools; if (!NT) return 'no NostrTools';
-            const M = await import('/js/nosdag/dag-publish.js');
-            const V = await import('/js/nosdag/ipfs-notes-view.js');
-            const sk = NT.generateSecretKey(); const pk = NT.getPublicKey(sk);
-            try { localStorage.removeItem('nosdag:head:'+pk); localStorage.removeItem('nosdag:posts:'+pk); } catch {}
-            const sign = async (t) => NT.finalizeEvent({ created_at:1, content:'', ...t }, sk);
-            const noStore = { publish: () => {} };
-            let prev = null;
-            for (let i=1;i<=3;i++) {
-              const tags = prev ? [['client','nosdag'],['prev',prev]] : [['client','nosdag']];
-              const ev = NT.finalizeEvent({ kind:1, created_at:i, tags, content:'**IPFS view** note #'+i+' — read back from IPFS' }, sk);
-              prev = await M.publishToDag({ signedEvent:ev, prevCid:prev, pubkey:pk, signEvent:sign, pool:noStore, writeRelays:[] });
-            }
-            await V.showIpfsNotes(pk);
-            await new Promise(r => setTimeout(r, 1200));
-            const cards = document.querySelectorAll('.nd-ipfsnote-note').length;
-            return 'IPFSVIEW ' + (cards===3 ? 'PASS' : 'FAIL') + ' | cards=' + cards;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'mediatest') {
-          // Phase 2 media: add real image bytes to the local node, then prove (a) the bytes
-          // round-trip back through the LOCAL GATEWAY (the path machine B uses to display IPFS
-          // media), (b) the ipfs:// ref rewrites to a gateway URL the feed's image regex matches,
-          // and (c) addImetaTags derives a NIP-92 imeta tag from the note content.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const Media = await import('/js/nosdag/media.js');
-            if (!Media.inNosdagShell()) return 'MEDIATEST FAIL | no shell bridge';
-            // a tiny but valid PNG (1x1, red) as bytes
-            const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-            const bin = atob(b64); const bytes = new Uint8Array(bin.length);
-            for (let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
-            const file = new File([bytes], 'red.png', { type: 'image/png' });
-            const ref = await Media.addFileToIpfs(file);              // ipfs://<CID>#media.png
-            const cid = ref.replace('ipfs://','').split('#')[0];
-            // (a) fetch the bytes back through the local gateway
-            let gotBytes = 0, gwOk = false;
-            try { const r = await fetch('http://127.0.0.1:8201/ipfs/'+cid); const buf = new Uint8Array(await r.arrayBuffer()); gotBytes = buf.length; gwOk = r.ok && gotBytes === bytes.length; } catch (e) { return 'MEDIATEST FAIL | gateway fetch: '+e.message; }
-            // (b) ipfs:// rewrites to a gateway URL the feed image regex matches
-            const rendered = Media.rewriteIpfsMedia(ref);
-            const imgRe = /(https?:\\/\\/[^\\s<]+\\.(jpg|jpeg|png|gif|webp|svg)(\\?[^\\s<]*)?)/gi;
-            const imgMatch = imgRe.test(rendered);
-            // (c) imeta derivation from content carrying the ref
-            const tmpl = { tags: [], content: 'look at this\\n\\n'+ref };
-            Media.addImetaTags(tmpl);
-            const imeta = tmpl.tags.find(t => t[0]==='imeta');
-            const imetaOk = !!imeta && imeta.includes('url ipfs://'+cid) && imeta.includes('m image/png');
-            const ok = gwOk && imgMatch && imetaOk && cid.startsWith('bafk');
-            return 'MEDIATEST ' + (ok?'PASS':'FAIL') + ' | cid='+cid.slice(0,16)+'… gwBytes='+gotBytes+' imgMatch='+imgMatch+' imeta='+imetaOk+' rendered='+rendered.slice(0,46);
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'mirrortest') {
-          // Phase 2 mirror-fetch + tombstone (§3.2/§7): a real local CID loads (no tombstone); a
-          // bogus CID fails local + (fake) mirror → "media resting" tombstone; clicking "Notify me"
-          // for a now-available CID swaps the media back in.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            await import('/js/nosdag/mirror-fetch.js');
-            const MF = window.nosdagMirror; const k = window.nosdag.kubo;
-            if (!MF || !k?.addMedia) return 'MIRRORTEST FAIL | no bridge';
-            window.__nosdagMirror = { publicGateways:['http://127.0.0.1:9/ipfs/'], localTimeout:500, mirrorTimeout:350, retryInterval:250, retryMax:8 };
-            const gw = k.gateway;
-            const b64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-            const bin=atob(b64); const by=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) by[i]=bin.charCodeAt(i);
-            const realCid=(await k.addMedia(by)).cid;
-            const bogusCid=realCid.slice(0,-6)+'aaaaaa';
-            const host=document.createElement('div'); host.id='mh'; document.body.appendChild(host);
-            const imgOk=document.createElement('img'); imgOk.src=gw+realCid+'#media.png'; host.appendChild(imgOk);
-            const imgBad=document.createElement('img'); imgBad.src=gw+bogusCid+'#media.png'; host.appendChild(imgBad);
-            MF.scan();
-            await new Promise(r=>setTimeout(r,2200));
-            const caseB = host.contains(imgOk) && imgOk.tagName==='IMG' && !host.querySelector('.nd-tombstone[data-cid="'+realCid+'"]');
-            const tomb = host.querySelector('.nd-tombstone');
-            const caseA = !!tomb && tomb.dataset.cid===bogusCid && !host.contains(imgBad);
-            const placeholder=document.createElement('img'); host.appendChild(placeholder);
-            MF.installTombstone(placeholder, realCid, '#media.png');
-            const ts=[...host.querySelectorAll('.nd-tombstone')].find(t=>t.dataset.cid===realCid);
-            ts.querySelector('.nd-tombstone-retry').click();
-            await new Promise(r=>setTimeout(r,2000));
-            const recovered = host.querySelector('img.nd-recovered-media');
-            const caseC = !!recovered && recovered.src.indexOf(realCid)!==-1 && !ts.isConnected;
-            const ok = caseB && caseA && caseC;
-            return 'MIRRORTEST '+(ok?'PASS':'FAIL')+' | caseA_tombstone='+caseA+' caseB_localLoads='+caseB+' caseC_recovers='+caseC;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'feedrendertest') {
-          // The user's exact scenario: a note with unreachable IPFS media, rendered through the
-          // REAL path (parseContent → innerHTML → processEmbeddedNotes, which bootstraps
-          // mirror-fetch) must show a "Locating media…" box and then a tombstone — never a blank.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const k = window.nosdag.kubo; const U = window.NostrUtils;
-            if (!U?.parseContent || !U?.processEmbeddedNotes) return 'FEEDRENDER FAIL | no utils';
-            window.__nosdagMirror = { publicGateways:['http://127.0.0.1:9/ipfs/'], localTimeout:400, mirrorTimeout:300, locatingDelay:150, retryInterval:250, retryMax:5 };
-            const b64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-            const bin=atob(b64); const by=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) by[i]=bin.charCodeAt(i);
-            const realCid=(await k.addMedia(by)).cid;
-            const bogus=realCid.slice(0,-6)+'aaaaaa';
-            const list=document.createElement('div'); list.id='feedrender'; document.body.appendChild(list);
-            list.innerHTML = '<div class="post"><div class="post-content">'+U.parseContent('look at this\\n\\nipfs://'+bogus+'#media.png')+'</div></div>';
-            const img = list.querySelector('img');
-            const imgViaGateway = !!img && /127\\.0\\.0\\.1:8201\\/ipfs\\//.test(img.getAttribute('src')||'');
-            await U.processEmbeddedNotes('feedrender');
-            await new Promise(r=>setTimeout(r,600));
-            const locating = !!list.querySelector('.nd-locating');
-            await new Promise(r=>setTimeout(r,1800));
-            const tomb = list.querySelector('.nd-tombstone');
-            const tombShown = !!tomb && tomb.dataset.cid===bogus;
-            const ok = imgViaGateway && tombShown;
-            return 'FEEDRENDER '+(ok?'PASS':'FAIL')+' | imgViaGateway='+imgViaGateway+' locatingShown='+locating+' tombstone='+tombShown;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'workertest') {
-          // Diagnose the monero.worker.js failure under app://: where does the file resolve, does a
-          // direct app:// Worker run, does a Blob-URL Worker run? Determines the fix (path vs loader).
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const out = [];
-            const probe = async (u) => { try { const r = await fetch(u); return r.status; } catch(e){ return 'ERR'; } };
-            out.push('root='+(await probe('app://bundle/monero.worker.js')));
-            out.push('lib='+(await probe('app://bundle/lib/monero.worker.js')));
-            const tryWorker = (url) => new Promise((resolve) => {
-              let w; try { w = new Worker(url); } catch(e){ resolve('ctor-throw'); return; }
-              let done=false; const fin=(v)=>{ if(!done){done=true; try{w.terminate()}catch{}; resolve(v); } };
-              w.onerror = () => fin('onerror');
-              w.onmessage = () => fin('message');
-              setTimeout(()=>fin('loaded-ok'), 2500);
-            });
-            out.push('appWorker='+(await tryWorker('app://bundle/lib/monero.worker.js')));
-            let blobRes;
-            try {
-              const txt = await (await fetch('app://bundle/lib/monero.worker.js')).text();
-              const url = URL.createObjectURL(new Blob([txt], {type:'text/javascript'}));
-              blobRes = await tryWorker(url);
-            } catch(e){ blobRes = 'blob-ERR'; }
-            out.push('blobWorker='+blobRes);
-            return 'WORKERTEST | ' + out.join(' | ');
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'walletcreatetest') {
-          // Prove the fix: point monero-ts at /lib/monero.worker.js, then actually create a wallet
-          // through the worker (offline, random keys). If it returns an address, the worker works.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            if (typeof MoneroTS === 'undefined') return 'WALLETCREATE FAIL | no MoneroTS';
-            let createRes;
-            try {
-              const w = await MoneroTS.createWalletFull({ networkType: MoneroTS.MoneroNetworkType.MAINNET, password:'x', proxyToWorker:true });
-              const addr = await w.getPrimaryAddress();
-              createRes = (addr && addr[0]==='4') ? 'WALLET-OK addr='+addr.slice(0,6)+'…' : 'addr?='+addr;
-              try { await w.close(); } catch {}
-            } catch(e){ createRes = 'CREATE-ERR:'+(e.message||e); }
-            return 'WALLETCREATE | ' + createRes;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'xmraddrtest') {
-          // L7: the client-side Monero address validator now base58-decodes + checks structure. Test
-          // it against a REAL mainnet address generated by the wallet (so a decoder bug can't silently
-          // false-reject and break tipping) plus a few invalid inputs.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            if (typeof MoneroTS === 'undefined') return 'XMRADDR FAIL | no MoneroTS';
-            const MC = await import('/js/wallet/monero-client.js');
-            const w = await MoneroTS.createWalletFull({ networkType: MoneroTS.MoneroNetworkType.MAINNET, password:'x', proxyToWorker:true });
-            const addr = await w.getPrimaryAddress();
-            try { await w.close(); } catch {}
-            const real = MC.isValidMoneroAddress(addr);                  // real mainnet addr → true
-            const garbage = !MC.isValidMoneroAddress('not_an_address');  // → false
-            const short = !MC.isValidMoneroAddress(addr.slice(0, 90));   // wrong length → false
-            const longer = !MC.isValidMoneroAddress(addr + 'A');         // length off → false
-            const ok = real && garbage && short && longer;
-            return 'XMRADDR ' + (ok?'PASS':'FAIL') + ' | real='+real+' garbage='+garbage+' short='+short+' longer='+longer+' addr='+addr.slice(0,6);
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'daemontest') {
-          // Confirm the wallet's Monero daemon is reachable from the renderer (origin app://bundle)
-          // now that CORS is injected — a get_info JSON-RPC should return the chain height.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            try {
-              const r = await fetch('https://nosmero.com:18089/json_rpc', {
-                method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({ jsonrpc:'2.0', id:'0', method:'get_info' })
-              });
-              const j = await r.json();
-              const h = j?.result?.height;
-              return 'DAEMONTEST ' + (h > 0 ? 'PASS' : 'FAIL') + ' | status='+r.status+' height='+(h||'none');
-            } catch(e) { return 'DAEMONTEST FAIL | ' + (e.message || e); }
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'publishtest') {
-          // Phase 2 Step 2: exercise dag-publish.publishToDag end-to-end — two chained posts,
-          // verify the second's prev IPLD link points at the first and the local head advances.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const NT = window.NostrTools; if (!NT) return 'no NostrTools';
-            const M = await import('/js/nosdag/dag-publish.js');
-            const sk = NT.generateSecretKey(); const pk = NT.getPublicKey(sk);
-            try { localStorage.removeItem('nosdag:head:' + pk); localStorage.removeItem('nosdag:posts:' + pk); } catch {}
-            const sign = async (t) => NT.finalizeEvent({ created_at: 1, content: '', ...t }, sk);
-            const noStore = { publish: () => {} };
-            const e1 = NT.finalizeEvent({ kind:1, created_at:1, tags:[['client','nosdag']], content:'dag post #1' }, sk);
-            const h1 = await M.publishToDag({ signedEvent:e1, prevCid:null, pubkey:pk, signEvent:sign, pool:noStore, writeRelays:[] });
-            const prev = M.getLocalHead(pk);
-            const e2 = NT.finalizeEvent({ kind:1, created_at:2, tags:[['client','nosdag'],['prev',prev]], content:'dag post #2' }, sk);
-            const h2 = await M.publishToDag({ signedEvent:e2, prevCid:prev, pubkey:pk, signEvent:sign, pool:noStore, writeRelays:[] });
-            const back = await window.nosdag.kubo.getPost(h2);
-            const notes = M.getPostCount(pk);
-            const ok = !!h1 && !!h2 && h1!==h2 && prev===h1 && back.event.content==='dag post #2' && back.prev===h1 && M.getLocalHead(pk)===h2 && notes===2;
-            return 'PUBLISHTEST ' + (ok?'PASS':'FAIL') + ' | notes='+notes+' | head2='+h2+' | #2.prev-link='+back.prev;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'pendingtest') {
-          // Phase 5 Slice 1: the relationship gate (who lands in Pending) + NIP-10 direct-parent
-          // resolution (which replies count as a reply to YOUR note), against the real modules.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const RG = await import('/js/nosdag/relationship-gate.js');
-            const PQ = await import('/js/nosdag/pending-queue.js');
-            const S  = await import('/js/state.js');
-            const me = 'aa'.repeat(32), friend = 'bb'.repeat(32), stranger = 'cc'.repeat(32);
-            S.setPublicKey(me);
-            S.setFollowingUsers(new Set([friend]));
-            // gate: followed -> auto, not-followed -> queue, self -> self, none -> ignore
-            const g = [RG.classifyReply(friend), RG.classifyReply(stranger), RG.classifyReply(me), RG.classifyReply(null)];
-            const gateOk = g[0]==='auto' && g[1]==='queue' && g[2]==='self' && g[3]==='ignore';
-            // NIP-10 direct parent
-            const myNote='note1';
-            const dp = {
-              marked:  PQ.directParentId({tags:[['e','root1','','root'],['e',myNote,'','reply']]}),       // myNote (marked reply wins)
-              topReply:PQ.directParentId({tags:[['e',myNote,'','root']]}),                                 // myNote (top-level reply to root)
-              deep:    PQ.directParentId({tags:[['e',myNote,'','root'],['e','other','','reply']]}),         // 'other' (descendant, NOT a reply to me)
-              positional:PQ.directParentId({tags:[['e',myNote]]}),                                          // myNote (positional fallback)
-              quote:   PQ.directParentId({tags:[['q','x'],['e',myNote]]}),                                  // null (quote-repost)
-              mention: PQ.directParentId({tags:[['e',myNote,'','mention']]}),                               // null (mention, not a reply)
-              none:    PQ.directParentId({tags:[['p',me]]})                                                 // null (no e-tag)
-            };
-            const dpOk = dp.marked===myNote && dp.topReply===myNote && dp.deep==='other' && dp.positional===myNote && dp.quote===null && dp.mention===null && dp.none===null;
-            // DOM render: seed one pending item, mount into the deck, assert panel row + rail badge
-            const seeded=[{id:'r1',author:stranger,content:'hello from a stranger',created_at:1,parentId:myNote}];
-            try { localStorage.setItem('nosdag:pending:'+me, JSON.stringify(seeded)); } catch {}
-            PQ.mountIntoDeck();
-            await new Promise(r=>setTimeout(r,300));
-            const panel=document.getElementById('ndReqPanel'), badge=document.getElementById('ndRequestsCount');
-            const rows=panel?panel.querySelectorAll('.nd-req-item').length:0;
-            const domOk = !!panel && rows===1 && !!badge && badge.style.display!=='none' && badge.textContent==='1';
-            try { localStorage.removeItem('nosdag:pending:'+me); } catch {}
-            return 'PENDINGTEST ' + (gateOk&&dpOk&&domOk?'PASS':'FAIL') + ' | gate='+JSON.stringify(g) + ' | parent='+JSON.stringify(dp) + ' | dom={panel:'+!!panel+',rows:'+rows+',badge:'+(badge&&badge.textContent)+'}';
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'threadindextest') {
-          // Phase 5 Slice 2: the curation overlay's pure ordering/partition + no-index passthrough.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const TI = await import('/js/nosdag/thread-index.js');
-            const nodes = ['a','b','c','d'].map(id => ({ post: { id, pubkey: 'zz' } }));
-            // index order ['c','a'] -> shown [c,a] in that order; b,d unendorsed (in input order)
-            const p = TI.partition(['c','a'], nodes);
-            const partOk = p.shown.map(n=>n.post.id).join(',')==='c,a' && p.unendorsed.map(n=>n.post.id).join(',')==='b,d';
-            // ids not present are ignored ('x'); a duplicate id is kept once ('b')
-            const p2 = TI.partition(['x','b','b'], nodes);
-            const part2Ok = p2.shown.map(n=>n.post.id).join(',')==='b' && p2.unendorsed.map(n=>n.post.id).join(',')==='a,c,d';
-            // no known index -> passthrough: show all, none unendorsed, hasIndex=false
-            const c = TI.curate('unknownpost','unknownauthor', nodes);
-            const curateOk = c.hasIndex===false && c.unendorsed.length===0 && c.shown.length===nodes.length;
-            const ok = partOk && part2Ok && curateOk;
-            return 'THREADINDEXTEST ' + (ok?'PASS':'FAIL') + ' | part='+partOk + ' part2='+part2Ok + ' curate='+curateOk;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'reciprocaltest') {
-          // Phase 5 Slice 3: the reciprocal-channel routing logic (thread-root resolution, open,
-          // route-by-root, route-by-anchor, peer/self rejection, expiry) against the real module.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const R = await import('/js/nosdag/reciprocal-channel.js');
-            const S = await import('/js/state.js');
-            const me = 'aa'.repeat(32), peer = 'dd'.repeat(32), other = 'ee'.repeat(32);
-            S.setPublicKey(me);
-            try { localStorage.removeItem('nosdag:reciprocal:' + me); } catch {}
-            R.reset();
-            // threadRootId: top-level note is its own root; root-marker wins; positional first e-tag
-            const tr = {
-              top:  R.threadRootId({ id:'root1', pubkey:peer, tags:[] }),
-              mark: R.threadRootId({ id:'x', pubkey:peer, tags:[['e','R','','root'],['e','P','','reply']] }),
-              pos:  R.threadRootId({ id:'y', pubkey:peer, tags:[['e','R2'],['e','P2']] })
-            };
-            const trOk = tr.top==='root1' && tr.mark==='R' && tr.pos==='R2';
-            // open a channel for thread root1 with peer; the reply you published is anchor 'myreply1'
-            R.openChannel('root1', peer, ['myreply1']);
-            const openOk = R.isOpen('root1', peer)===true && R.isOpen('root1', other)===false && R.isOpen('otherroot', peer)===false;
-            // route by thread root (inbound reply tagged root1) and by anchor (reply to your reply)
-            const byRoot   = R.routes({ pubkey:peer,  tags:[['e','root1','','reply']] }, 'root1');
-            const byAnchor = R.routes({ pubkey:peer,  tags:[['e','myreply1','','reply']] }, 'myreply1');
-            const wrongPeer= R.routes({ pubkey:other, tags:[['e','root1','','reply']] }, 'root1');
-            const selfNo   = R.routes({ pubkey:me,    tags:[['e','root1','','reply']] }, 'root1');
-            const routeOk = byRoot===true && byAnchor===true && wrongPeer===false && selfNo===false;
-            // expiry: a channel past expiresAt never opens or routes
-            try { localStorage.setItem('nosdag:reciprocal:' + me, JSON.stringify([{ threadRoot:'oldroot', peer, anchors:[], expiresAt: 1 }])); } catch {}
-            R.reset();
-            const expOk = R.isOpen('oldroot', peer)===false && R.routes({ pubkey:peer, tags:[['e','oldroot','','reply']] }, 'oldroot')===false;
-            try { localStorage.removeItem('nosdag:reciprocal:' + me); } catch {}
-            const ok = trOk && openOk && routeOk && expOk;
-            return 'RECIPROCALTEST ' + (ok?'PASS':'FAIL') + ' | root='+JSON.stringify(tr) + ' open='+openOk + ' route={byRoot:'+byRoot+',byAnchor:'+byAnchor+',wrongPeer:'+wrongPeer+',self:'+selfNo+'} exp='+expOk;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'threadfollowtest') {
-          // Phase 5 Slice 4: thread-follow state machine — root resolution, follow/unfollow/toggle
-          // scoping, and per-pubkey persistence (no relays/Kubo needed; openSub just no-ops + retries).
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const CT = await import('/js/nosdag/consumption-tiers.js');
-            const S = await import('/js/state.js');
-            const me = 'aa'.repeat(32);
-            S.setPublicKey(me);
-            try { localStorage.removeItem('nosdag:threadfollow:' + me); } catch {}
-            // rootIdOf: a root note is its own root; root-marker wins; else positional first e-tag; miss = self
-            S.eventCache['root1']  = { id:'root1',  pubkey:'bb', tags:[] };
-            S.eventCache['reply1'] = { id:'reply1', pubkey:'cc', tags:[['e','R','','root'],['e','P','','reply']] };
-            S.eventCache['reply2'] = { id:'reply2', pubkey:'cc', tags:[['e','R2'],['e','P2']] };
-            const rootOk = CT.rootIdOf('root1')==='root1' && CT.rootIdOf('reply1')==='R' && CT.rootIdOf('reply2')==='R2' && CT.rootIdOf('missing')==='missing';
-            CT.init();
-            CT.follow('root1');
-            const followOk = CT.isFollowing('root1')===true && CT.isFollowing('nope')===false;
-            const persistOk = JSON.parse(localStorage.getItem('nosdag:threadfollow:'+me)||'[]').includes('root1');
-            const offOk = CT.toggle('root1')===false && CT.isFollowing('root1')===false;  // toggle returns the new state
-            const onOk  = CT.toggle('root1')===true  && CT.isFollowing('root1')===true;
-            const rootsOk = CT.followedRoots().includes('root1');
-            try { localStorage.removeItem('nosdag:threadfollow:'+me); } catch {}
-            const ok = rootOk && followOk && persistOk && offOk && onOk && rootsOk;
-            return 'THREADFOLLOWTEST ' + (ok?'PASS':'FAIL') + ' | root='+rootOk+' follow='+followOk+' persist='+persistOk+' toggle='+(offOk&&onOk)+' roots='+rootsOk;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'interoptest') {
-          // Phase 5 Slice 5: smart-publish (option C) — applyInterop ALWAYS rewrites ipfs:// media
-          // (body + NIP-92 imeta url) to a dweb.link gateway URL so any client renders it, and the
-          // shell's parseContent re-points BOTH ipfs:// and that gateway URL at the local node so
-          // Nosdag keeps serving the CID P2P. No toggle, no per-account mode (no relays/Kubo needed).
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const IP = await import('/js/nosdag/interop-publish.js');
-            const U = await import('/js/utils.js');
-            const G = 'https://dweb.link/ipfs/';
-            // publish: body + imeta rewritten unconditionally, extension preserved (body frag / imeta mime)
-            const ev = { content:'pic ipfs://Qmabc#media.png and ipfs://Qmvid#media.mp4 !', tags:[['imeta','url ipfs://Qmabc','m image/png']] };
-            IP.applyInterop(ev);
-            const bodyOk = ev.content === 'pic '+G+'Qmabc?filename=media.png and '+G+'Qmvid?filename=media.mp4 !';
-            const imetaOk = ev.tags[0][1] === 'url '+G+'Qmabc?filename=media.png';
-            // plain text (no media) untouched
-            const evP = { content:'just text, no media', tags:[] };
-            IP.applyInterop(evP);
-            const plainOk = evP.content==='just text, no media';
-            // render: parseContent re-points media at the local gateway for BOTH forms — the portable
-            // ipfs:// ref AND the published dweb.link gateway URL — so the shell serves the CID P2P
-            // while vanilla clients (no window.nosdag) keep the gateway URL.
-            const LG = window.nosdag.kubo.gateway;
-            const hN = U.parseContent('pic ipfs://Qmabc#media.png !');
-            const hI = U.parseContent('pic '+G+'Qmabc?filename=media.png !');
-            const renderNativeOk = hN.includes('<img') && hN.includes(LG+'Qmabc') && !hN.includes('ipfs://');
-            const renderInteropOk = hI.includes('<img') && hI.includes(LG+'Qmabc') && !hI.includes('dweb.link');
-            const ok = bodyOk && imetaOk && plainOk && renderNativeOk && renderInteropOk;
-            return 'INTEROPTEST ' + (ok?'PASS':'FAIL') + ' | body='+bodyOk+' imeta='+imetaOk+' plain='+plainOk+' renderNative='+renderNativeOk+' renderInterop='+renderInteropOk;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'trendingtest') {
-          // Trending Monero feed: the app:// handler fetches /trending-cache.json LIVE from the
-          // backend (not the frozen build-time snapshot). Compare the served generated_at to the
-          // bundled snapshot's (2026-05-30T02:00:28.133Z) — live should be newer, with notes.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const SNAPSHOT = '2026-05-30T02:00:28.133Z';
-            const r = await fetch('/trending-cache.json');
-            const okStatus = r.ok;
-            const j = await r.json();
-            const hasNotes = Array.isArray(j.notes) && j.notes.length > 0;
-            const isLive = typeof j.generated_at === 'string' && j.generated_at > SNAPSHOT;
-            const ok = okStatus && hasNotes && isLive;
-            return 'TRENDINGTEST ' + (ok?'PASS':'FAIL') + ' | status='+okStatus+' notes='+(j.notes?j.notes.length:0)+' generated_at='+j.generated_at+' live='+isLive;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'cloudbridgetest') {
-          // Phase 3: Cloud Bridge — per-account map. Auth probes hit the REAL Filebase endpoints
-          // with a bogus token (must be rejected). Two fake accounts link one bridge kind each and
-          // must never see each other's: A links RPC while B stays unlinked, B links PSA while A
-          // keeps RPC, unlinking A leaves B linked. No-pubkey status reports needsAccount. Plus
-          // media-CID extraction + pinNote no-op-when-unlinked.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const CB = await import('/js/nosdag/cloud-bridge.js');
-            const b = window.nosdag.cloudBridge;
-            const A = '11'.repeat(32), B = '22'.repeat(32);
-            await b.unlink({ pubkey:A }).catch(()=>{}); await b.unlink({ pubkey:B }).catch(()=>{}); // clean slate
-            const s0 = await b.status({ pubkey:A }); const unlinked0 = !!(s0 && !s0.linked);
-            const sn = await b.status({}); const needsAcct = !!(sn && !sn.linked && sn.needsAccount);
-            // auth probes against the REAL Filebase endpoints — a bogus token must be rejected
-            const tr = await b.test({ kind:'rpc', endpoint:'https://rpc.filebase.io', key:'bogus' });
-            const rpcProbe = !!(tr && (tr.status===401||tr.status===403));
-            const tp = await b.test({ kind:'psa', endpoint:'https://api.filebase.io/v1/ipfs', key:'bogus' });
-            const psaProbe = !!(tp && (tp.status===401||tp.status===403));
-            // A links RPC → A linked, B still unlinked (the isolation this feature exists for)
-            await b.link({ pubkey:A, kind:'rpc', endpoint:'https://rpc.filebase.io', key:'dummy' });
-            const sa1 = await b.status({ pubkey:A }); const aLinked = !!(sa1?.linked && sa1.kind==='rpc' && sa1.provider==='Filebase');
-            const sb1 = await b.status({ pubkey:B }); const bIsolated = !!(sb1 && !sb1.linked);
-            // B links PSA → both coexist, each seeing only their own
-            await b.link({ pubkey:B, kind:'psa', endpoint:'https://api.pinata.cloud/psa', key:'dummy' });
-            const sb2 = await b.status({ pubkey:B }); const bLinked = !!(sb2?.linked && sb2.kind==='psa' && sb2.provider==='Pinata');
-            const sa2 = await b.status({ pubkey:A }); const aStill = !!(sa2?.linked && sa2.kind==='rpc');
-            // unlink A → only A's entry goes
-            const ua = await b.unlink({ pubkey:A });
-            const sa3 = await b.status({ pubkey:A }); const aGone = !!(ua?.ok && sa3 && !sa3.linked);
-            const sb3 = await b.status({ pubkey:B }); const bSurvives = !!(sb3?.linked);
-            const ub = await b.unlink({ pubkey:B });
-            const sb4 = await b.status({ pubkey:B }); const bGone = !!(ub?.ok && sb4 && !sb4.linked);
-            // media CID extraction (ipfs:// AND interop dweb.link forms, deduped)
-            const C1='QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG';
-            const C2='bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi';
-            const ev = { pubkey:A, content:'a https://dweb.link/ipfs/'+C1+'?filename=media.png b ipfs://'+C2+'#media.mp4', tags:[['imeta','url https://dweb.link/ipfs/'+C1]] };
-            const cids = CB.extractMediaCids(ev);
-            const extractOk = cids.includes(C1) && cids.includes(C2) && cids.length===2;
-            let noopOk = true; try { await CB.pinNote(ev,'Qmhead',null); } catch { noopOk=false; }
-            const ok = unlinked0 && needsAcct && rpcProbe && psaProbe && aLinked && bIsolated && bLinked && aStill && aGone && bSurvives && bGone && extractOk && noopOk;
-            return 'CLOUDBRIDGETEST ' + (ok?'PASS':'FAIL') + ' | unlinked='+unlinked0+' needsAcct='+needsAcct
-              +' rpcProbe='+rpcProbe+'('+(tr&&(tr.status||tr.error))+') psaProbe='+psaProbe
-              +' aLink='+aLinked+' bIsolated='+bIsolated+' bLink='+bLinked+' aStill='+aStill
-              +' aGone='+aGone+' bSurvives='+bSurvives+' bGone='+bGone+' extract='+extractOk+' noop='+noopOk;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'hostedfollowstest') {
-          // Phase 3 Slice 2: altruistic-pin engine — dagSize over a real unixfs blob, default caps
-          // (250 MB/acct · 5 GB global), the autoNewFollows toggle, isHosted, and hostAccount's
-          // graceful no-content error (anonymous, so resolveHeadCid finds nothing → the safe path).
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const AP = await import('/js/nosdag/altruistic-pin.js');
-            const k = window.nosdag.kubo;
-            const big = new Uint8Array(300*1024); for (let i=0;i<big.length;i++) big[i]=i&255;
-            const am = await k.addMedia(big);
-            const sz = am.cid ? await k.dagSize(am.cid) : { error:'no media cid' };
-            const sizeOk = !!(sz && !sz.error && sz.bytes >= 300*1024);
-            const u = AP.usage();
-            const capsOk = u.capBytes === 5120*1024*1024 && u.perAccountBytes === 250*1024*1024 && u.count === 0;
-            const autoDefault = AP.autoNewFollows() === true;
-            AP.setAutoNewFollows(false); const autoOff = AP.autoNewFollows() === false; AP.setAutoNewFollows(true);
-            const notHosted = AP.isHosted('00'.repeat(32)) === false;
-            const ha = await AP.hostAccount('00'.repeat(32));
-            const gracefulOk = !!(ha && ha.ok === false && ha.error);
-            const ok = sizeOk && capsOk && autoDefault && autoOff && notHosted && gracefulOk;
-            return 'HOSTEDFOLLOWSTEST ' + (ok?'PASS':'FAIL') + ' | size='+sizeOk+'('+(sz&&(sz.bytes||sz.error))+')'
-              +' caps='+capsOk+' autoDefault='+autoDefault+' autoOff='+autoOff+' notHosted='+notHosted+' graceful='+gracefulOk;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'durabilitytest') {
-          // Phase 3 Slice 3: durability ("who hosts you") tracks the bridge state — at-risk when only
-          // your device holds your notes, backed-up + You/Filebase host list when a bridge is linked.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const D = await import('/js/nosdag/durability.js');
-            const S = await import('/js/state.js');
-            const b = window.nosdag.cloudBridge;
-            const pk = '33'.repeat(32); S.setPublicKey(pk); // bridges are per-account — durability needs a "you"
-            await b.unlink({ pubkey:pk }).catch(()=>{}); await D.refreshBridge();
-            const atRisk0 = D.isAtRisk()===true;
-            const h0 = D.hosts(); const hosts0Ok = h0.length===1 && h0[0].kind==='local';
-            await b.link({ pubkey:pk, kind:'rpc', endpoint:'https://rpc.filebase.io', key:'dummy' }); await D.refreshBridge();
-            const linkedNotRisk = D.isAtRisk()===false;
-            const h1 = D.hosts(); const hosts1Ok = h1.length===2 && h1[1].kind==='bridge' && h1[1].label==='Filebase';
-            await b.unlink({ pubkey:pk }).catch(()=>{}); await D.refreshBridge();
-            const backToRisk = D.isAtRisk()===true;
-            // node-count plumbing: providers() returns a numeric DHT provider count for a real CID
-            const ev = { id:'pv1', pubkey:'pk', created_at:1, kind:1, tags:[], content:'prov test', sig:'s' };
-            const pr0 = await window.nosdag.kubo.putPost({ event: ev, prevCid: null });
-            const pc = pr0.cid ? await window.nosdag.kubo.providers(pr0.cid, { timeoutMs: 6000, max: 10 }) : { error:'no cid' };
-            const provOk = !!(pc && !pc.error && typeof pc.count === 'number' && pc.count >= 0);
-            const ok = atRisk0 && hosts0Ok && linkedNotRisk && hosts1Ok && backToRisk && provOk;
-            return 'DURABILITYTEST ' + (ok?'PASS':'FAIL') + ' | atRisk0='+atRisk0+' hosts0='+hosts0Ok+' linkedNotRisk='+linkedNotRisk+' hosts1='+hosts1Ok+'('+(h1[1]&&h1[1].label)+') backToRisk='+backToRisk+' providers='+provOk+'('+(pc&&(pc.count!==undefined?pc.count:pc.error))+')';
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'tormode') {
-          // Anonymous mode end-to-end: switch the live app into Tor mode (tears down Kubo, boots
-          // tor + the Helia node), wait for the onion, then round-trip a signed DAG + media block
-          // through the Helia-over-Tor backend and the Tor-mode media gateway.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            if (!window.nosdag?.mode) return 'TORMODE FAIL | no mode bridge';
-            const setRes = await window.nosdag.mode.set('tor');
-            if (setRes?.error) return 'TORMODE FAIL | switch error: ' + setRes.error;
-            let s = null;
-            for (let i=0;i<180;i++){ s = await window.nosdag.kubo.status(); if (s?.ready && s.mode==='tor') break; await new Promise(r=>setTimeout(r,1000)); }
-            if (!(s?.ready && s.mode==='tor')) return 'TORMODE FAIL | node not ready · last=' + JSON.stringify(s);
-            const onionOk = /^[a-z2-7]{56}\\.onion$/.test(s.onion||'');
-            // signed DAG round-trip over the Helia-over-Tor backend (prev IPLD link must survive)
-            const ev1 = { id:'t1', pubkey:'pk', created_at:1, kind:1, tags:[], content:'tor note #1', sig:'s1' };
-            const r1 = await window.nosdag.kubo.putPost({ event: ev1, prevCid: null });
-            if (r1.error) return 'TORMODE FAIL | putPost: ' + r1.error;
-            const ev2 = { id:'t2', pubkey:'pk', created_at:2, kind:1, tags:[['prev',r1.cid]], content:'tor note #2', sig:'s2' };
-            const r2 = await window.nosdag.kubo.putPost({ event: ev2, prevCid: r1.cid });
-            const back = await window.nosdag.kubo.getPost(r2.cid);
-            const dagOk = !back.error && back.event.content==='tor note #2' && back.prev===r1.cid;
-            // media round-trips through the Tor-mode local gateway
-            const b64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-            const bin=atob(b64); const by=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) by[i]=bin.charCodeAt(i);
-            const am = await window.nosdag.kubo.addMedia(by);
-            let gwOk=false; try { const r=await fetch(window.nosdag.kubo.gateway+am.cid); const buf=new Uint8Array(await r.arrayBuffer()); gwOk=r.ok && buf.length===by.length; } catch(e){}
-            const ok = onionOk && dagOk && gwOk;
-            return 'TORMODE ' + (ok?'PASS':'FAIL') + ' | onion='+onionOk+'('+(s.onion||'').slice(0,16)+'…) dag='+dagOk+' gateway='+gwOk+' peers='+s.peers+' head='+r2.cid;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'torproxy') {
-          // External-proxy variant of TORMODE: spawn a PRIVATE tor daemon (no hidden services) that
-          // plays the user's "already-running proxy", then switch the app into anonymous mode
-          // pointed at it. Asserts the external branch: ready on tor, torExternal, NO onion,
-          // DAG + gateway still work (outbound-capable, inbound-invisible).
-          const extPort = 9377
-          let ext = null
-          try {
-            ext = new TorProcess({
-              dataDir: path.join(app.getPath('userData'), 'tor-ext-smoke'),
-              socksPort: extPort,
-              hiddenServices: [],
-              onLog: (m) => console.log('[ext-tor]', m)
-            })
-            await ext.start()
-          } catch (e) { console.log('[smoke] TORPROXY FAIL | external tor spawn: ' + (e?.message || e)) }
-          if (ext?.ready) {
-            const result = await win.webContents.executeJavaScript(`(async () => {
-              if (!window.nosdag?.mode) return 'TORPROXY FAIL | no mode bridge';
-              const pr = await window.nosdag.mode.torProxy('127.0.0.1:${extPort}');
-              if (pr?.error) return 'TORPROXY FAIL | set proxy: ' + pr.error;
-              const setRes = await window.nosdag.mode.set('tor');
-              if (setRes?.error) return 'TORPROXY FAIL | switch error: ' + setRes.error;
-              let s = null;
-              for (let i=0;i<60;i++){ s = await window.nosdag.kubo.status(); if (s?.ready && s.mode==='tor') break; await new Promise(r=>setTimeout(r,1000)); }
-              if (!(s?.ready && s.mode==='tor')) return 'TORPROXY FAIL | node not ready · last=' + JSON.stringify(s);
-              const extOk = s.torExternal === true && s.torProxyAddr === '127.0.0.1:${extPort}';
-              const noOnion = !s.onion && !s.onionMultiaddr;
-              const ev1 = { id:'x1', pubkey:'pk', created_at:1, kind:1, tags:[], content:'proxy note #1', sig:'s1' };
-              const r1 = await window.nosdag.kubo.putPost({ event: ev1, prevCid: null });
-              if (r1.error) return 'TORPROXY FAIL | putPost: ' + r1.error;
-              const ev2 = { id:'x2', pubkey:'pk', created_at:2, kind:1, tags:[['prev',r1.cid]], content:'proxy note #2', sig:'s2' };
-              const r2 = await window.nosdag.kubo.putPost({ event: ev2, prevCid: r1.cid });
-              const back = await window.nosdag.kubo.getPost(r2.cid);
-              const dagOk = !back.error && back.event.content==='proxy note #2' && back.prev===r1.cid;
-              const b64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-              const bin=atob(b64); const by=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) by[i]=bin.charCodeAt(i);
-              const am = await window.nosdag.kubo.addMedia(by);
-              let gwOk=false; try { const r=await fetch(window.nosdag.kubo.gateway+am.cid); const buf=new Uint8Array(await r.arrayBuffer()); gwOk=r.ok && buf.length===by.length; } catch(e){}
-              const cleared = await window.nosdag.mode.torProxy(null); // leave no proxy behind for later smokes
-              const ok = extOk && noOnion && dagOk && gwOk && !!cleared?.ok;
-              return 'TORPROXY ' + (ok?'PASS':'FAIL') + ' | external='+extOk+'('+(s.torProxyAddr||'')+') noOnion='+noOnion+' dag='+dagOk+' gateway='+gwOk+' cleared='+!!cleared?.ok;
-            })()`).catch((e) => 'EXEC ERR: ' + e.message)
-            console.log('[smoke]', result)
-          }
-          try { await ext?.stop() } catch {}
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'wstest') {
-          // Can the renderer open a plain ws:// (non-TLS) WebSocket from the app:// secure
-          // context? Onion relays are ws:// (the onion address IS the encryption+auth), so
-          // Chromium's mixed-content rules decide whether onion relays can be dialed straight
-          // from the renderer or need a main-process bridge. Constructor-level check — a
-          // blocked scheme throws SecurityError synchronously, no network needed.
-          const result = await win.webContents.executeJavaScript(`(() => {
-            const out = {};
-            try { const w = new WebSocket('ws://mixed-content-probe.invalid/'); out.ws = 'allowed'; try { w.close() } catch {} }
-            catch (e) { out.ws = 'BLOCKED: ' + e.message; }
-            try { const w2 = new WebSocket('wss://tls-probe.invalid/'); out.wss = 'allowed'; try { w2.close() } catch {} }
-            catch (e) { out.wss = 'BLOCKED: ' + e.message; }
-            return 'WSTEST | ws=' + out.ws + ' | wss=' + out.wss;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'onioncard') {
-          // visual: the Anonymous Mode page (posture switch + onion relay picker)
-          await win.webContents.executeJavaScript('window.loadAnonModePage && window.loadAnonModePage()').catch(() => {})
-          await new Promise((r) => setTimeout(r, 3000))
-        } else if (view === 'chooser') {
-          // visual: the boot-time posture chooser (normally shown before the app loads)
-          await win.loadURL('app://bundle/mode-select.html')
-          await new Promise((r) => setTimeout(r, 1200))
-        } else if (view === 'medialibview') {
-          // visual: the Media library page in the real layout, seeded with two media notes
-          await win.webContents.executeJavaScript(`(async () => {
-            const NT = window.NostrTools;
-            const M = await import('/js/nosdag/dag-publish.js');
-            const ML = await import('/js/nosdag/media-library.js');
-            const S = await import('/js/state.js');
-            const k = window.nosdag.kubo;
-            const sk = NT.generateSecretKey(); const pk = NT.getPublicKey(sk);
-            const sign = async (t) => NT.finalizeEvent({ created_at:1, content:'', ...t }, sk);
-            const noStore = { publish: () => {} };
-            const mk = (seed) => { const by = new Uint8Array(900); for (let i=0;i<by.length;i++) by[i]=(i*seed)&255; return by; };
-            const mA = (await k.addMedia(mk(3))).cid;
-            const mB = (await k.addMedia(mk(7))).cid;
-            let prev = null;
-            const contents = ['shot of the rig ipfs://'+mA+'#media.png', 'and the build ipfs://'+mB+'#media.png'];
-            for (let i=0;i<2;i++) {
-              const tags = prev ? [['client','nosdag'],['prev',prev]] : [['client','nosdag']];
-              const ev = NT.finalizeEvent({ kind:1, created_at: 1749700000+i, tags, content: contents[i] }, sk);
-              prev = await M.publishToDag({ signedEvent:ev, prevCid:prev, pubkey:pk, signEvent:sign, pool:noStore, writeRelays:[] });
-            }
-            S.setPublicKey(pk);
-            await window.loadMediaLibraryPage(); // media tab of the My Node page
-          })()`).catch((e) => console.log('[smoke] medialibview ERR:', e.message))
-          await new Promise((r) => setTimeout(r, 2500))
-        } else if (view === 'settingsview') {
-          // visual: the Settings category panes in the real layout (stubbed login).
-          // NOSDAG_SMOKE_PANE=payments|relays|privacy|data|profile|feed picks the pane.
-          const pane = /^[a-z]+$/.test(process.env.NOSDAG_SMOKE_PANE || '') ? process.env.NOSDAG_SMOKE_PANE : ''
-          await win.webContents.executeJavaScript(`(async () => {
-            const NT = window.NostrTools;
-            const S = await import('/js/state.js');
-            const sk = NT.generateSecretKey(); const pk = NT.getPublicKey(sk);
-            S.setPublicKey(pk);
-            await window.loadSettings();
-            ${pane ? `window.switchSettingsPane && window.switchSettingsPane('${pane}');` : ''}
-          })()`).catch((e) => console.log('[smoke] settingsview ERR:', e.message))
-          await new Promise((r) => setTimeout(r, 2500))
-        } else if (view === 'relaypilltest') {
-          // The header relay pill follows the posture: clearnet shows the configured count,
-          // Tor shows the onion selection — and setPosture refreshes it immediately.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const OR = await import('/js/nosdag/onion-relays.js');
-            const el = document.getElementById('relayCount');
-            if (!el) return 'RELAYPILL FAIL | no element';
-            OR.setPosture('clearnet');
-            window.updateRelayIndicator(5);
-            const clearOk = el.textContent === '5 relays connected';
-            OR.setPosture('tor'); // setPosture refreshes the pill on its own
-            const torOk = /onion relay/.test(el.textContent) && /Tor/.test(el.textContent);
-            OR.setPosture('clearnet');
-            const backOk = /relays connected/.test(el.textContent);
-            const ok = clearOk && torOk && backOk;
-            return 'RELAYPILL ' + (ok?'PASS':'FAIL') + ' | clear='+clearOk+' tor='+torOk+'('+el.textContent+') back='+backOk;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'chiptest') {
-          // The "show my own notes" chip is Following-feed-only: hidden on every page nav
-          // (Media, Node, …), shown again on home (logged in) and on the Following feed tab,
-          // hidden on other feed tabs.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const S = await import('/js/state.js');
-            S.setPublicKey('aa'.repeat(32));
-            const chip = document.getElementById('followingFeedChip');
-            if (!chip) return 'CHIPTEST FAIL | no chip element';
-            chip.style.display = 'block'; // simulate logged-in user sitting on Following
-            window.navigateTo('media');
-            await new Promise(r=>setTimeout(r,700));
-            const onMedia = chip.style.display === 'none';
-            window.navigateTo('node');
-            await new Promise(r=>setTimeout(r,700));
-            const onNode = chip.style.display === 'none';
-            window.navigateTo('home');
-            await new Promise(r=>setTimeout(r,900));
-            const onHome = chip.style.display === 'block';
-            await window.handleFeedTabClick('trending', null);
-            await new Promise(r=>setTimeout(r,700));
-            const onTrending = chip.style.display === 'none';
-            await window.handleFeedTabClick('following', null);
-            await new Promise(r=>setTimeout(r,700));
-            const onFollowing = chip.style.display === 'block';
-            const ok = onMedia && onNode && onHome && onTrending && onFollowing;
-            return 'CHIPTEST ' + (ok?'PASS':'FAIL') + ' | media='+onMedia+' node='+onNode+' home='+onHome+' trending='+onTrending+' following='+onFollowing;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'medialibtest') {
-          // Media library E2E: publish a 2-note chain referencing 2 media files (one referenced
-          // twice — must dedupe), enumerate from the DAG, round-trip the local pin toggle
-          // (isPinned → unpin → re-pin), confirm the bridge column degrades gracefully with no
-          // bridge linked, then render the real page and count rows.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const NT = window.NostrTools; if (!NT) return 'no NostrTools';
-            const M = await import('/js/nosdag/dag-publish.js');
-            const ML = await import('/js/nosdag/media-library.js');
-            const S = await import('/js/state.js');
-            const k = window.nosdag.kubo;
-            const sk = NT.generateSecretKey(); const pk = NT.getPublicKey(sk);
-            try { localStorage.removeItem('nosdag:head:'+pk); localStorage.removeItem('nosdag:posts:'+pk); } catch {}
-            const sign = async (t) => NT.finalizeEvent({ created_at:1, content:'', ...t }, sk);
-            const noStore = { publish: () => {} };
-            const mk = (seed) => { const by = new Uint8Array(600); for (let i=0;i<by.length;i++) by[i]=(i+seed)&255; return by; };
-            const mA = (await k.addMedia(mk(1))).cid;
-            const mB = (await k.addMedia(mk(99))).cid;
-            let prev = null;
-            const contents = ['note one ipfs://'+mA+'#media.png', 'note two ipfs://'+mA+'#media.png and ipfs://'+mB+'#media.png'];
-            for (let i=0;i<2;i++) {
-              const tags = prev ? [['client','nosdag'],['prev',prev]] : [['client','nosdag']];
-              const ev = NT.finalizeEvent({ kind:1, created_at:i+1, tags, content: contents[i] }, sk);
-              prev = await M.publishToDag({ signedEvent:ev, prevCid:prev, pubkey:pk, signEvent:sign, pool:noStore, writeRelays:[] });
-            }
-            // enumerate: 2 distinct media, deduped
-            const items = await ML.collectMedia(pk);
-            const cids = items.map(i=>i.cid);
-            const enumOk = items.length===2 && cids.includes(mA) && cids.includes(mB);
-            // local pin round-trip
-            const p0 = await k.isPinned(mA); const wasPinned = p0.pinned===true;
-            await k.unpinRecursive(mA); const p1 = await k.isPinned(mA);
-            await k.pinRecursive(mA, 15000); const p2 = await k.isPinned(mA);
-            const pinOk = wasPinned && p1.pinned===false && p2.pinned===true;
-            // bridge column degrades gracefully with nothing linked
-            const bs = await window.nosdag.cloudBridge.pinStatus({ pubkey: pk, cids });
-            const bridgeOk = !!(bs && (bs.skipped || Array.isArray(bs.pinned)) && !bs.error);
-            // the real page renders rows
-            S.setPublicKey(pk);
-            const host = document.createElement('div'); document.body.appendChild(host);
-            await ML.renderMediaLibrary(host);
-            await new Promise(r=>setTimeout(r,1500));
-            const rows = host.querySelectorAll('.nd-ml-row').length;
-            const pills = host.querySelectorAll('.nd-ml-pill[data-cell=local]').length;
-            const uiOk = rows===2 && pills===2;
-            const ok = enumOk && pinOk && bridgeOk && uiOk;
-            return 'MEDIALIBTEST ' + (ok?'PASS':'FAIL') + ' | enum='+enumOk+'('+items.length+') pin='+pinOk+'('+wasPinned+','+p1.pinned+','+p2.pinned+') bridge='+bridgeOk+'('+(bs.skipped||bs.kind||'?')+') ui='+uiOk+'(rows='+rows+')';
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'archivetest') {
-          // Timeline import — the storage half, relay-free: crafted signed kind-1s become
-          // archive envelopes under one pinned manifest; chain notes (signed prev tag) are
-          // skipped; a forged signature is rejected; a re-run is a no-op; an added note grows
-          // the archive and supersedes the old manifest pin.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const TI = await import('/js/nosdag/timeline-import.js');
-            const NT = window.NostrTools;
-            const k = window.nosdag.kubo;
-            const sk = NT.generateSecretKey(); const pk = NT.getPublicKey(sk);
-            try { localStorage.removeItem('nosdag:archive:'+pk); } catch {}
-            const mk = (content, at, tags=[]) => NT.finalizeEvent({ kind:1, created_at:at, tags, content }, sk);
-            const e1 = mk('old note one', 1000);
-            const e2 = mk('old note two with https://example.com/pic.png media ref', 2000);
-            const chainNote = mk('a nosdag chain note', 3000, [['prev','bafyfake']]);
-            // JSON round-trip strips finalizeEvent's verified-symbol (spread would copy it and
-            // short-circuit verifyEvent) — relay-delivered events never carry it either.
-            const forged = JSON.parse(JSON.stringify(mk('forged', 1500))); forged.sig = 'ab'.repeat(64);
-            const s1 = await TI.importEvents(pk, [e1, e2, chainNote, forged], { mirrorMedia:false });
-            const importOk = s1.imported===2 && s1.skippedChain===1 && s1.badSig===1 && !!s1.manifestCid;
-            const man = await window.nosdag.archive.get({ cid: s1.manifestCid });
-            const manOk = !man.error && man.pubkey===pk && man.count===2 && man.ids.length===2 && man.notes.length===2;
-            const pinned = await k.isPinned(s1.manifestCid);
-            const pinOk = pinned.pinned===true;
-            const back = await k.getPost(man.notes[0]);
-            const envOk = !back.error && back.event.content==='old note one' && back.prev===null;
-            const s2 = await TI.importEvents(pk, [e1, e2, chainNote], { mirrorMedia:false });
-            const rerunOk = s2.upToDate===true && s2.imported===0 && s2.alreadyArchived===2 && s2.manifestCid===s1.manifestCid;
-            const e3 = mk('old note three', 2500);
-            const s3 = await TI.importEvents(pk, [e1, e2, e3], { mirrorMedia:false });
-            const growOk = s3.imported===1 && s3.total===3 && s3.manifestCid!==s1.manifestCid;
-            const man3 = await window.nosdag.archive.get({ cid: s3.manifestCid });
-            const grow2 = !man3.error && man3.count===3 && man3.ids.includes(e3.id);
-            const oldPin = await k.isPinned(s1.manifestCid);
-            const supersededOk = oldPin.pinned===false; // envelopes stay covered by the new manifest's pin
-            // heal support: clearnet short-circuits checkMedia (Kubo can't hold an oversized
-            // raw block, and probing absent CIDs would Bitswap-wait) — and the reworked
-            // importEvents flow above already proved a heal no-op keeps re-runs up-to-date
-            const cm = await window.nosdag.archive.checkMedia({ cids: man3.notes.slice(0,1) });
-            const checkOk = !cm.error && cm.blocks && Object.keys(cm.blocks).length===0;
-            const ok = importOk && manOk && pinOk && envOk && rerunOk && growOk && grow2 && supersededOk && checkOk;
-            return 'ARCHIVETEST ' + (ok?'PASS':'FAIL') + ' | import='+importOk+'('+s1.imported+','+s1.skippedChain+','+s1.badSig+') man='+manOk
-              +' pin='+pinOk+' env='+envOk+' rerun='+rerunOk+' grow='+(growOk&&grow2)+' superseded='+supersededOk+' checkMedia='+checkOk;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'archivereadtest') {
-          // Archive READ side, relay-free: import → readAuthorArchive returns verified,
-          // newest-first notes with manifest-mapped media URLs swapped to the local gateway;
-          // a forged-signature envelope is skipped; a manifest bound to a different author
-          // is refused outright.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const TI = await import('/js/nosdag/timeline-import.js');
-            const DR = await import('/js/nosdag/dag-read.js');
-            const NT = window.NostrTools;
-            const A = window.nosdag.archive;
-            const gw = window.nosdag.kubo.gateway;
-            const sk = NT.generateSecretKey(); const pk = NT.getPublicKey(sk);
-            const otherPk = NT.getPublicKey(NT.generateSecretKey());
-            const KEY = 'nosdag:archive:'+pk, OKEY = 'nosdag:archive:'+otherPk;
-            try { localStorage.removeItem(KEY); localStorage.removeItem(OKEY); } catch {}
-            const mk = (content, at) => NT.finalizeEvent({ kind:1, created_at:at, tags:[], content }, sk);
-            const MEDIA_URL = 'https://example.com/pic.png';
-            const e1 = mk('archived one', 1000);
-            const e2 = mk('archived two with ' + MEDIA_URL + ' inline', 2000);
-            const s1 = await TI.importEvents(pk, [e1, e2], { mirrorMedia:false });
-            if (!s1.manifestCid) return 'ARCHIVEREADTEST FAIL | import failed';
-            // Re-commit with a media map entry (points at an existing local block — the
-            // manifest just needs a pinnable CID) so the reader's URL swap is exercised.
-            const man1 = await A.get({ cid: s1.manifestCid });
-            const mediaCid = man1.notes[0];
-            const c2 = await A.commit({ pubkey: pk, ids: man1.ids, notes: man1.notes, media: { [MEDIA_URL]: mediaCid }, prevManifestCid: s1.manifestCid });
-            if (c2.error) return 'ARCHIVEREADTEST FAIL | media commit: ' + c2.error;
-            try { localStorage.setItem(KEY, c2.cid); } catch {}
-            const r1 = await DR.readAuthorArchive(pk, {});
-            const readOk = r1.manifestCid===c2.cid && r1.count===2 && r1.notes.length===2 && r1.skipped===0;
-            const sortOk = r1.notes[0]?.created_at===2000 && r1.notes[1]?.created_at===1000;
-            const swapped = r1.notes[0]?.content || '';
-            const mediaOk = swapped.includes(gw + mediaCid) && !swapped.includes(MEDIA_URL);
-            const provOk = r1.notes.every((n) => !!n._nosdagCid);
-            // Forged signature: stored fine (putNote trusts its caller), but the READER must skip it.
-            const forged = JSON.parse(JSON.stringify(mk('forged', 1500))); forged.sig = 'ab'.repeat(64);
-            const pf = await A.putNote({ event: forged });
-            const c3 = await A.commit({ pubkey: pk, ids: [...man1.ids, forged.id], notes: [...man1.notes, pf.cid], media: {}, prevManifestCid: c2.cid });
-            try { localStorage.setItem(KEY, c3.cid); } catch {}
-            const r2 = await DR.readAuthorArchive(pk, {});
-            const forgeOk = r2.notes.length===2 && r2.skipped===1;
-            // Author binding: a manifest naming a different pubkey is refused whole.
-            try { localStorage.setItem(OKEY, c3.cid); } catch {}
-            const r3 = await DR.readAuthorArchive(otherPk, {});
-            const bindOk = r3.notes.length===0 && !r3.manifestCid;
-            try { localStorage.removeItem(KEY); localStorage.removeItem(OKEY); } catch {}
-            const ok = readOk && sortOk && mediaOk && provOk && forgeOk && bindOk;
-            return 'ARCHIVEREADTEST ' + (ok?'PASS':'FAIL') + ' | read='+readOk+' sort='+sortOk+' media='+mediaOk+' prov='+provOk+' forge='+forgeOk+'('+r2.notes.length+','+r2.skipped+') bind='+bindOk;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'onionrelaytest') {
-          // Onion relays end-to-end: clearnet getters untouched → switch the live app into Tor
-          // mode → relay getters swap to the onion selection (mirror semantics included) → a
-          // REAL NIP-01 REQ reaches live onion relays through the session-wide Tor proxy →
-          // switch back, getters revert. This is the scope's verification #1.
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const OR = await import('/js/nosdag/onion-relays.js');
-            const Relays = await import('/js/relays.js');
-            const isOnion = (u) => u.includes('.onion');
-            // establish the clearnet baseline ourselves — a previous Tor-mode smoke may have
-            // quit without switching back, leaving userData's mode file (and so this boot) on tor
-            let m0 = await window.nosdag.mode.get();
-            if (m0?.mode !== 'clearnet') {
-              await window.nosdag.mode.set('clearnet');
-              let s0 = null;
-              for (let i=0;i<60;i++){ s0 = await window.nosdag.kubo.status(); if (s0?.ready && s0.mode==='clearnet') break; await new Promise(r=>setTimeout(r,1000)); }
-              await OR.syncPosture();
-            }
-            // known list + defaults shaped right
-            const listOk = OR.KNOWN_ONION_RELAYS.length === 25 && OR.DEFAULT_SELECTION.length === 5;
-            // clearnet posture: no override anywhere
-            const clearReadOk = !Relays.getReadRelays().some(isOnion) && !Relays.getWriteRelays().some(isOnion);
-            // selection persists (drop one, re-read, restore defaults)
-            const d0 = OR.selectedUrls();
-            OR.setSelected(d0.slice(1));
-            const persistOk = OR.selectedUrls().length === 4;
-            OR.restoreDefaults();
-            const restoreOk = OR.selectedUrls().length === 5;
-            // → Tor mode (no migrate opts; logged out)
-            const setRes = await window.nosdag.mode.set('tor');
-            if (setRes?.error) return 'ONIONRELAYTEST FAIL | switch: ' + setRes.error;
-            let s = null;
-            for (let i=0;i<180;i++){ s = await window.nosdag.kubo.status(); if (s?.ready && s.mode==='tor') break; await new Promise(r=>setTimeout(r,1000)); }
-            if (!(s?.ready && s.mode==='tor')) return 'ONIONRELAYTEST FAIL | tor node not ready';
-            await OR.syncPosture();
-            const postureOk = OR.getPosture() === 'tor';
-            // getters swapped: reads = onions only; writes = onion writes + clearnet mirror (default ON)
-            const reads = Relays.getReadRelays();
-            const readsOk = reads.length === 5 && reads.every(isOnion);
-            const wMirror = Relays.getWriteRelays();
-            const mirrorOk = wMirror.filter(isOnion).length >= 3 && wMirror.some(u => !isOnion(u));
-            OR.setMirror(false);
-            const wStrict = Relays.getWriteRelays();
-            const strictOk = wStrict.length > 0 && wStrict.every(isOnion) && OR.filterInbox(['wss://nos.lol','ws://abc.onion']).join()==='ws://abc.onion';
-            OR.setMirror(true);
-            // the real thing: NIP-01 REQ to the live defaults through the session Tor proxy
-            const checks = await Promise.all(OR.selectedUrls().map(async (u) => ({ u, r: await OR.checkRelay(u) })));
-            const up = checks.filter(c => c.r.ok);
-            const liveOk = up.length >= 1;
-            const liveDetail = checks.map(c => c.u.slice(5,13)+(c.r.ok?'✓'+c.r.openMs+'ms':'✗')).join(' ');
-            // back to clearnet; getters revert
-            const backRes = await window.nosdag.mode.set('clearnet');
-            for (let i=0;i<60;i++){ s = await window.nosdag.kubo.status(); if (s?.ready && s.mode==='clearnet') break; await new Promise(r=>setTimeout(r,1000)); }
-            await OR.syncPosture();
-            const revertOk = !backRes?.error && OR.getPosture() === 'clearnet' && !Relays.getReadRelays().some(isOnion);
-            const ok = listOk && clearReadOk && persistOk && restoreOk && postureOk && readsOk && mirrorOk && strictOk && liveOk && revertOk;
-            return 'ONIONRELAYTEST ' + (ok?'PASS':'FAIL') + ' | list='+listOk+' clearnet='+clearReadOk+' persist='+(persistOk&&restoreOk)
-              + ' posture='+postureOk+' reads='+readsOk+' mirror='+mirrorOk+' strict='+strictOk
-              + ' live='+up.length+'/5('+liveDetail+') revert='+revertOk;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        } else if (view === 'backuptest') {
-          // "Download my history" E2E over the real IPC bridge: publish a 3-note chain (one note
-          // referencing real media), export the full history to a CAR, then inspect (whose backup?
-          // complete? counts?) and restore — and prove the chain walks back signature-verified.
-          // Dialogs are skipped via toPath/fromPath; a non-CAR file must be refused.
-          fs.mkdirSync(path.join(__dirname, '.tmp'), { recursive: true })
-          const tmpCar = JSON.stringify(path.join(__dirname, '.tmp', 'backuptest.car'))
-          const badFile = JSON.stringify(path.join(__dirname, 'package.json'))
-          const result = await win.webContents.executeJavaScript(`(async () => {
-            const NT = window.NostrTools; if (!NT) return 'no NostrTools';
-            const M = await import('/js/nosdag/dag-publish.js');
-            const HB = window.nosdag.history; const k = window.nosdag.kubo;
-            if (!HB) return 'BACKUPTEST FAIL | no history bridge';
-            const sk = NT.generateSecretKey(); const pk = NT.getPublicKey(sk);
-            try { localStorage.removeItem('nosdag:head:'+pk); localStorage.removeItem('nosdag:posts:'+pk); } catch {}
-            const sign = async (t) => NT.finalizeEvent({ created_at:1, content:'', ...t }, sk);
-            const noStore = { publish: () => {} };
-            // real media for note #2 to reference
-            const b64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-            const bin=atob(b64); const by=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) by[i]=bin.charCodeAt(i);
-            const am = await k.addMedia(by);
-            let prev = null; const heads = [];
-            for (let i=1;i<=3;i++) {
-              const content = i===2 ? 'backup note #2 ipfs://'+am.cid+'#media.png' : 'backup note #'+i;
-              const tags = prev ? [['client','nosdag'],['prev',prev]] : [['client','nosdag']];
-              const ev = NT.finalizeEvent({ kind:1, created_at:i, tags, content }, sk);
-              prev = await M.publishToDag({ signedEvent:ev, prevCid:prev, pubkey:pk, signEvent:sign, pool:noStore, writeRelays:[] });
-              heads.push(prev);
-            }
-            // export the full chain
-            const exp = await HB.export({ headCid: prev, toPath: ${tmpCar} });
-            if (!exp || !exp.ok) return 'BACKUPTEST FAIL | export: ' + (exp && exp.error || 'no response');
-            const expOk = exp.notes===3 && exp.media===1 && exp.blocks>=4;
-            // a non-CAR file must be refused
-            const bad = await HB.inspect({ fromPath: ${badFile} });
-            const badOk = !!(bad && bad.error);
-            // inspect: ownership + integrity + counts, before any import
-            const ins = await HB.inspect({ fromPath: exp.path });
-            if (ins.error) return 'BACKUPTEST FAIL | inspect: ' + ins.error;
-            const insOk = ins.notes===3 && ins.media===1 && ins.pubkey===pk && !ins.missingPrev && NT.verifyEvent(ins.event) && ins.headCid===prev;
-            // restore (idempotent into the same node) — the IPC the Settings button drives
-            const res = await HB.restore();
-            const resOk = !!(res && res.ok && res.headCid===prev);
-            // the no-fork rule's engine: ancestor checks both ways
-            const c1 = await HB.contains({ headCid: prev, targetCid: heads[0] });
-            const c2 = await HB.contains({ headCid: heads[0], targetCid: prev });
-            const containsOk = c1.contains===true && c2.contains===false;
-            // the restored chain walks back fully verified
-            const R = await import('/js/nosdag/dag-read.js');
-            const notes = await R.walkNotes(prev, {});
-            const walkOk = notes.length===3 && notes.every(n=>NT.verifyEvent(n));
-            // the Settings section (the real index.html markup) mounts in-shell: unhides + renders both buttons
-            const HBU = await import('/js/nosdag/history-backup.js');
-            await HBU.mountBackupSection();
-            const sec = document.getElementById('ndHistoryBackupSection');
-            const uiOk = !!sec && sec.style.display==='' && !!sec.querySelector('#nd-hb-export') && !!sec.querySelector('#nd-hb-restore');
-            const ok = expOk && badOk && insOk && resOk && containsOk && walkOk && uiOk;
-            return 'BACKUPTEST ' + (ok?'PASS':'FAIL') + ' | export='+expOk+'('+exp.notes+'n/'+exp.media+'m/'+exp.blocks+'b) badRefused='+badOk+' inspect='+insOk+' restore='+resOk+' contains='+containsOk+' walk='+walkOk+' ui='+uiOk;
-          })()`).catch((e) => 'EXEC ERR: ' + e.message)
-          console.log('[smoke]', result)
-          await new Promise((r) => setTimeout(r, 400))
-        }
-        // NOSDAG_SMOKE_THEME=light|dark flips the theme before capture (visual QA of both worlds);
-        // NOSDAG_SMOKE_ACCENT="accent,hi,deep" trials an accent candidate on top.
-        const smokeTheme = process.env.NOSDAG_SMOKE_THEME
-        if (smokeTheme === 'light' || smokeTheme === 'dark') {
-          await win.webContents.executeJavaScript(`document.documentElement.setAttribute('data-theme', '${smokeTheme}')`)
-          const acc = (process.env.NOSDAG_SMOKE_ACCENT || '').split(',')
-          if (acc.length === 3 && acc.every((c) => /^#[0-9a-f]{6}$/i.test(c))) {
-            await win.webContents.executeJavaScript(`{
-              const s = document.documentElement.style
-              s.setProperty('--nd-accent', '${acc[0]}')
-              s.setProperty('--nd-accent-hi', '${acc[1]}')
-              s.setProperty('--nd-accent-deep', '${acc[2]}')
-              s.setProperty('--nd-accent-soft', 'color-mix(in srgb, ${acc[0]} 12%, transparent)')
-            }`)
-          }
-          await new Promise((r) => setTimeout(r, 600))
-        }
-        const img = await win.webContents.capturePage()
-        const out = path.join(__dirname, 'smoke-screenshot.png')
-        fs.writeFileSync(out, img.toPNG())
-        console.log('[smoke] screenshot →', out)
-      } catch (e) { console.error('[smoke] capture failed:', e?.message || e) }
-      console.log('[smoke] auto-quit')
-      app.quit()
-    }, view === 'node' ? 10000 : 16000)
-  }
+  // Headless CI smoke: the driver boots a view in the live renderer, asserts, screenshots, quits.
+  if (smokeDriver) smokeDriver.runSmokeViews({ win, app })
 })
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })

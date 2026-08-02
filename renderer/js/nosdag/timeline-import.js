@@ -26,7 +26,10 @@ const ARCHIVE_KEY = (pk) => `nosdag:archive:${pk}`
 const PAGE = 500
 const MAX_PAGES = 40                      // 20k notes — a backstop, not a target
 const PAGE_TIMEOUT = 15000
-const MEDIA_MAX_BYTES = 50 * 1024 * 1024  // matches the composer's attachment cap
+// The re-mirror path is buffered (HTTP fetch → bytes over IPC), so it keeps its own bound —
+// legacy media lived on hosted services with caps of this order anyway. Composer attachments
+// are NOT bounded by this: picked video streams from disk with no size cap.
+const MEDIA_MAX_BYTES = 200 * 1024 * 1024
 
 const shell = () => window.nosdag?.archive
 

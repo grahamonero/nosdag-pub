@@ -1,8 +1,11 @@
 {
   "name": "nosdag",
   "private": true,
-  "version": "0.1.0",
-  "description": "Nosdag desktop shell — Electron app: a clearnet Kubo node or an anonymous Helia-over-Tor node in the main process, behind a privileged app:// renderer.",
+  "version": "0.1.2",
+  "description": "Nosdag desktop shell \u2014 Electron app: a clearnet Kubo node or an anonymous Helia-over-Tor node in the main process, behind a privileged app:// renderer.",
+  "homepage": "https://nosdag.com",
+  "author": "Nosdag contributors <nosdag@nosdag.com>",
+  "license": "MIT",
   "type": "module",
   "main": "main.mjs",
   "engines": {
@@ -38,13 +41,108 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "electron": "^42.5.0"
+    "electron": "^42.5.0",
+    "electron-builder": "^26.15.3"
   },
   "build": {
-    "//": "electron-builder config (not wired yet) — the §4.1 asar-unpack of the Go binary lives here",
     "appId": "com.nosdag.app",
+    "productName": "Nosdag",
+    "copyright": "MIT \u2014 Nosdag contributors",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "afterPack": "scripts/mac-adhoc-sign.cjs",
     "asarUnpack": [
       "node_modules/kubo/kubo/**"
-    ]
+    ],
+    "files": [
+      "main.mjs",
+      "preload.cjs",
+      "lib/**",
+      "renderer/**",
+      "!renderer/design/**",
+      "!**/*.map",
+      "!**/{.DS_Store,.git,.tmp}",
+      "node_modules/**"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "tar.gz"
+      ],
+      "category": "Network",
+      "icon": "build/icons",
+      "synopsis": "Peer-to-peer Nostr client with an IPFS node built in",
+      "description": "A desktop peer-to-peer social network. Nostr keypairs provide identity and relay signaling; an IPFS node embedded in the app holds your notes, media and history. Includes Monero tipping and an anonymous Tor mode.",
+      "desktop": {
+        "entry": {
+          "Name": "Nosdag",
+          "Comment": "Your notes, on your own node",
+          "Categories": "Network;InstantMessaging;"
+        }
+      },
+      "syncDesktopName": true,
+      "executableName": "nosdag"
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0 | libgtk-3-0t64",
+        "libnotify4",
+        "libnss3",
+        "libxss1 | libxss1t64",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0 | libatspi2.0-0t64",
+        "libsecret-1-0"
+      ],
+      "recommends": [
+        "tor",
+        "ffmpeg"
+      ]
+    },
+    "appImage": {
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icons/512x512.png",
+      "artifactName": "${productName}-${version}-win-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Nosdag"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.social-networking",
+      "icon": "build/icons/512x512.png",
+      "darkModeSupport": true,
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
+    },
+    "dmg": {
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    }
   }
 }

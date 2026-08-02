@@ -78,6 +78,11 @@ function copyBtn (text) {
   }
 }
 
+// A failed switch reverts the posture in main and this card re-renders to the settled
+// (usually clearnet) state — which used to wipe the error the instant it was shown.
+// Keep the last failure here so the re-rendered card can still say what went wrong.
+let lastSwitchError = null
+
 function render (card, st, hostedCount = 0) {
   const onTor = st.mode === 'tor'
   const switching = !!st.switching
@@ -148,6 +153,11 @@ function render (card, st, hostedCount = 0) {
 
   card.querySelector('#nd-tor-onion-copy')?.addEventListener('click', copyBtn(st.onion))
   card.querySelector('.nd-tor-btn')?.addEventListener('click', () => doSwitch(card, onTor ? 'clearnet' : 'tor'))
+
+  if (lastSwitchError && !switching) {
+    const e = card.querySelector('#nd-tor-err')
+    if (e) { e.textContent = lastSwitchError; e.classList.add('show') }
+  }
 }
 
 async function doSwitch (card, target, extra) {
@@ -211,13 +221,17 @@ async function doSwitch (card, target, extra) {
     .catch(() => { /* module optional */ })
 
   if (res?.error) {
-    err.textContent = res.error + (res.mode ? ` (now in ${res.mode} mode)` : '')
+    lastSwitchError = res.error + (res.mode ? ` (now in ${res.mode} mode)` : '')
+    err.textContent = lastSwitchError
     err.classList.add('show')
     prog.classList.remove('show')
-  } else if (target === 'tor') {
-    // Just landed in Tor mode — arm the reactive announce loop so our onion pointer publishes as soon
-    // as the node + relays are ready (and retries until a relay ACKs), without a manual announce() call.
-    import('./onion-discovery.js').then(OD => (OD.ensureAnnounceLoop || OD.announceOnion)?.()).catch(() => {})
+  } else {
+    lastSwitchError = null
+    if (target === 'tor') {
+      // Just landed in Tor mode — arm the reactive announce loop so our onion pointer publishes as soon
+      // as the node + relays are ready (and retries until a relay ACKs), without a manual announce() call.
+      import('./onion-discovery.js').then(OD => (OD.ensureAnnounceLoop || OD.announceOnion)?.()).catch(() => {})
+    }
   }
   // Re-read the settled state and re-render (button flips, onion appears/clears).
   await mountTorCard(card)
