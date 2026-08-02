@@ -185,6 +185,9 @@ pre .p{color:var(--accent)}
 .callout pre:last-child{margin-bottom:0}
 
 /* ---- faq ---- */
+.faq-group{margin-bottom:34px}
+.faq-group:last-child{margin-bottom:0}
+.faq-topic{margin:0 0 10px; color:var(--accent)}
 .faq{border-top:1px solid var(--line)}
 .faq details{border-bottom:1px solid var(--line); padding:2px 0}
 .faq summary{
@@ -487,7 +490,9 @@ $env:TOR_BIN="C:\path\to\tor.exe"; npm start</pre>
       <h2>Questions worth asking first</h2>
     </div>
 
-    <div class="faq">
+        <div class="faq-group rv">
+      <p class="micro faq-topic">Getting started</p>
+      <div class="faq">
       <details>
         <summary>Is Nosdag finished?</summary>
         <div class="a">
@@ -498,27 +503,27 @@ $env:TOR_BIN="C:\path\to\tor.exe"; npm start</pre>
         </div>
       </details>
       <details>
-        <summary>Are my notes private?</summary>
+        <summary>Which platforms does it run on?</summary>
         <div class="a">
-          <p>No more than on any other Nostr client. Your notes are public and signed — anyone can
-            read them and verify they came from your key. That is the point of the format.</p>
-          <p>What Nosdag protects is different: anonymous mode hides your IP and location from
-            relays and peers, Monero keeps payment amounts and addresses off a public ledger, and
-            direct messages are encrypted. If you need the <em>content</em> of a note to be
-            private, do not post it.</p>
+          <p>It is an Electron app, so Linux, macOS, and Windows all work in principle from source
+            with Node 22+. Day-to-day development and testing happen on Linux, so that is the best
+            trodden path today. Packaged, signed builds for all three are the next milestone.</p>
         </div>
       </details>
       <details>
-        <summary>What happens to my notes when my computer is off?</summary>
+        <summary>Where is the code, and what is the licence?</summary>
         <div class="a">
-          <p>Someone has to be holding a copy. Your node serves your data, so when it is off, your
-            media can stop resolving for other people.</p>
-          <p>Three answers ship in the app: link a pinning service so a copy stays online, let the
-            people who follow you host your account on their nodes, or accept that you are only
-            reachable while you are running. Nosdag shows you which of these is true rather than
-            implying your data is magically everywhere.</p>
+          <p>Everything you run is in the
+            <a href="https://github.com/grahamonero/nosdag-pub">nosdag-pub repository</a>, MIT
+            licensed. Read it before you trust it with a key — that is a reasonable thing to expect
+            of software like this.</p>
         </div>
       </details>
+      </div>
+    </div>
+    <div class="faq-group rv">
+      <p class="micro faq-topic">Nostr compatibility</p>
+      <div class="faq">
       <details>
         <summary>Will my existing account and follows work?</summary>
         <div class="a">
@@ -542,6 +547,46 @@ $env:TOR_BIN="C:\path\to\tor.exe"; npm start</pre>
             nothing here breaks other clients.</p>
         </div>
       </details>
+      </div>
+    </div>
+    <div class="faq-group rv">
+      <p class="micro faq-topic">Your notes and data</p>
+      <div class="faq">
+      <details>
+        <summary>What happens to my notes when my computer is off?</summary>
+        <div class="a">
+          <p>Someone has to be holding a copy. Your node serves your data, so when it is off, your
+            media can stop resolving for other people.</p>
+          <p>Three answers ship in the app: link a pinning service so a copy stays online, let the
+            people who follow you host your account on their nodes, or accept that you are only
+            reachable while you are running. Nosdag shows you which of these is true rather than
+            implying your data is magically everywhere.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Does it interfere with an IPFS node I already run?</summary>
+        <div class="a">
+          <p>No. The bundled node uses its own ports — API <code>5201</code>, gateway
+            <code>8201</code>, swarm <code>4201</code> — specifically so it cannot collide with a
+            standard IPFS Desktop or Kubo installation.</p>
+        </div>
+      </details>
+      </div>
+    </div>
+    <div class="faq-group rv">
+      <p class="micro faq-topic">Privacy and keys</p>
+      <div class="faq">
+      <details>
+        <summary>Are my notes private?</summary>
+        <div class="a">
+          <p>No more than on any other Nostr client. Your notes are public and signed — anyone can
+            read them and verify they came from your key. That is the point of the format.</p>
+          <p>What Nosdag protects is different: anonymous mode hides your IP and location from
+            relays and peers, Monero keeps payment amounts and addresses off a public ledger, and
+            direct messages are encrypted. If you need the <em>content</em> of a note to be
+            private, do not post it.</p>
+        </div>
+      </details>
       <details>
         <summary>What if I lose my key?</summary>
         <div class="a">
@@ -562,6 +607,11 @@ $env:TOR_BIN="C:\path\to\tor.exe"; npm start</pre>
             from your node while that setting is on. The app tells you this on the same page.</p>
         </div>
       </details>
+      </div>
+    </div>
+    <div class="faq-group rv">
+      <p class="micro faq-topic">Payments</p>
+      <div class="faq">
       <details>
         <summary>Why Monero rather than Bitcoin or Lightning?</summary>
         <div class="a">
@@ -571,30 +621,17 @@ $env:TOR_BIN="C:\path\to\tor.exe"; npm start</pre>
         </div>
       </details>
       <details>
-        <summary>Which platforms does it run on?</summary>
+        <summary>Do I need to run a Monero node to send tips?</summary>
         <div class="a">
-          <p>It is an Electron app, so Linux, macOS, and Windows all work in principle from source
-            with Node 22+. Day-to-day development and testing happen on Linux, so that is the best
-            trodden path today. Packaged, signed builds for all three are the next milestone.</p>
+          <p>No. The wallet is built into the app and syncs against public Monero nodes, so tipping
+            works out of the box. Your keys never leave your machine — the node only relays blocks
+            and broadcasts transactions, it never holds anything.</p>
+          <p>If you would rather not trust a public node, the Tip Jar lets you point the wallet at
+            your own. In anonymous mode that traffic rides its own Tor circuit, kept separate from
+            your relay and browsing circuits.</p>
         </div>
       </details>
-      <details>
-        <summary>Does it interfere with an IPFS node I already run?</summary>
-        <div class="a">
-          <p>No. The bundled node uses its own ports — API <code>5201</code>, gateway
-            <code>8201</code>, swarm <code>4201</code> — specifically so it cannot collide with a
-            standard IPFS Desktop or Kubo installation.</p>
-        </div>
-      </details>
-      <details>
-        <summary>Where is the code, and what is the licence?</summary>
-        <div class="a">
-          <p>Everything you run is in the
-            <a href="https://github.com/grahamonero/nosdag-pub">nosdag-pub repository</a>, MIT
-            licensed. Read it before you trust it with a key — that is a reasonable thing to expect
-            of software like this.</p>
-        </div>
-      </details>
+      </div>
     </div>
   </div>
 </section>
