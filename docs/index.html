@@ -67,7 +67,9 @@ h1,h2,h3{font-weight:800; color:var(--txt); line-height:1.15; margin:0}
   font-family:var(--mono); font-size:10px; font-weight:500;
   letter-spacing:.2em; text-transform:uppercase; color:var(--gilt);
 }
-.mono{font-family:var(--mono)}
+/* JetBrains Mono runs visually larger than Alegreya Sans at the same px — step inline
+   mono down so a code word inside a sentence doesn't jump in size */
+.mono{font-family:var(--mono); font-size:.94em}
 
 /* ---- top bar ---- */
 .top{
@@ -163,6 +165,8 @@ pre{
   font-family:var(--mono); font-size:13.5px; line-height:1.75; color:var(--txt);
 }
 @media (prefers-color-scheme: light){ pre{border:2px solid #17161A} }
+/* a bare npub is one long unbreakable token — wrap it rather than scroll it sideways */
+pre.npub{white-space:pre-wrap; word-break:break-all; line-height:1.6}
 pre .c{color:var(--mute)}
 pre .p{color:var(--accent)}
 
@@ -171,8 +175,14 @@ pre .p{color:var(--accent)}
   background:var(--card); border:var(--card-border); border-left:3px solid var(--rest);
   border-radius:var(--radius); padding:18px 20px; margin-top:22px;
 }
-.callout strong{color:var(--txt)}
-.callout p{margin:6px 0 0; color:var(--dim); font-size:15.5px}
+.callout strong{
+  color:var(--txt); display:block; margin-bottom:8px;
+  font-size:16.5px; font-weight:800;
+}
+.callout p{margin:0 0 10px; color:var(--dim); font-size:15.5px}
+.callout p:last-child{margin-bottom:0}
+.callout pre{margin:12px 0; font-size:13px}
+.callout pre:last-child{margin-bottom:0}
 
 /* ---- faq ---- */
 .faq{border-top:1px solid var(--line)}
@@ -364,10 +374,23 @@ footer .sp{margin-left:auto}
     </div>
 
     <div class="callout rv">
-      <strong>Optional extras.</strong>
-      <p><span class="mono">ffmpeg</span> on your PATH lets you attach video from a phone — Nosdag
-        strips the metadata and converts it so everyone can play it. <span class="mono">tor</span>
-        is needed for anonymous mode; without it, everything else still works.</p>
+      <strong>Optional extras</strong>
+      <p>ffmpeg on your PATH lets you attach video from a phone — Nosdag strips the metadata and
+        converts it so everyone can play it. Tor is needed for anonymous mode; without it,
+        everything else still works.</p>
+    </div>
+
+    <div class="callout rv" style="border-left-color:var(--accent)">
+      <strong>Windows: an untested build</strong>
+      <p>There is a Windows zip on the releases page, but nobody has confirmed it runs — it was
+        cross-built on Linux and no Windows machine was available to test it. It may not start at
+        all. There's no installer yet either; extract the zip and run
+        <span class="mono">Nosdag.exe</span> inside. Windows will warn about an unknown publisher,
+        because it isn't code-signed.</p>
+      <p>If you try it, please say whether it worked — that report is the only way it gets
+        verified. Send a note on Nostr to:</p>
+<pre class="npub">npub1xhfclgh0klylfvdlyzjd9n0dwvd32tkcwxs24jwhydrjvhymgtvql23s4p</pre>
+      <p style="margin-top:12px"><a class="btn btn-quiet" href="https://github.com/grahamonero/nosdag-pub/releases/download/v0.1.1/Nosdag-0.1.1-x64.zip">Download Windows zip (untested)</a></p>
     </div>
   </div>
 </section>
@@ -427,14 +450,17 @@ cd nosdag-pub</pre>
     </ol>
 
     <div class="callout rv">
-      <strong>Optional extras, per system.</strong>
-      <p><span class="mono">ffmpeg</span> lets you attach phone video; <span class="mono">tor</span>
-        is needed for anonymous mode. macOS: <span class="mono">brew install ffmpeg tor</span>.
-        Windows: <span class="mono">winget install Gyan.FFmpeg</span>, and Tor comes from the
-        <a href="https://www.torproject.org/download/tor/">Tor Expert Bundle</a>. Neither is
+      <strong>Optional extras</strong>
+      <p>ffmpeg lets you attach video from a phone. Tor is needed for anonymous mode. Neither is
         required for everything else to work.</p>
-      <p>If <span class="mono">tor</span> isn't on your PATH, point the app at it — the syntax
-        differs by shell:</p>
+<pre><span class="c"># macOS</span>
+brew install ffmpeg tor
+
+<span class="c"># Windows — ffmpeg via winget, Tor from the Tor Expert Bundle</span>
+winget install Gyan.FFmpeg</pre>
+      <p>Windows Tor downloads live at
+        <a href="https://www.torproject.org/download/tor/">torproject.org</a>. If Tor isn't on your
+        PATH, point the app at it — the syntax differs by shell:</p>
 <pre><span class="c"># macOS / Linux</span>
 TOR_BIN=/path/to/tor npm start
 
