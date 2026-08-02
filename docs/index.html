@@ -327,7 +327,9 @@ footer .sp{margin-left:auto}
       <p class="micro">Download</p>
       <h2>Linux builds, version 0.1.1</h2>
       <p>Pick whichever suits your system. All three are the same app, x86_64, and nothing is
-        code-signed yet — your desktop may warn you about an unknown publisher.</p>
+        code-signed yet — your desktop may warn you about an unknown publisher. On macOS or
+        Windows, <a href="#run">run it from source</a> instead — there are no packaged builds
+        for those yet.</p>
     </div>
 
     <div class="cards">
@@ -376,17 +378,35 @@ footer .sp{margin-left:auto}
   <div class="wrap">
     <div class="sec-head rv">
       <p class="micro">Or run from source</p>
-      <h2>From source, in four commands</h2>
-      <p>Prefer to read the code before you run it, or on a distro the builds don't suit? This
-        takes about a minute on a machine that already has Node.</p>
+      <h2>From source — the way in on macOS and Windows</h2>
+      <p>There are no packaged builds for macOS or Windows yet, so this is how you run Nosdag
+        there. It also suits anyone who would rather read the code first, or is on a distro the
+        Linux builds don't fit. Steps 2 to 4 are identical on every system; only installing Node
+        differs.</p>
     </div>
 
     <ol class="steps">
       <li class="rv">
-        <h3>Install Node.js 22.12 or newer</h3>
-        <p>The repo ships an <code class="mono">.nvmrc</code>, so with nvm it is one command.</p>
-<pre><span class="c"># with nvm — otherwise install Node 22 however you prefer</span>
+        <h3>Install Node.js 22.12 or newer, and Git</h3>
+        <p>The repo ships an <span class="mono">.nvmrc</span>, so anything that reads it picks the
+          right version. Node 22 is a hard requirement — Electron 42 won't install on older.</p>
+        <p class="micro" style="margin-top:16px">Linux</p>
+<pre><span class="c"># nvm — or your package manager, as long as it gives you Node 22+</span>
 nvm install 22 &amp;&amp; nvm use 22</pre>
+        <p class="micro" style="margin-top:16px">macOS</p>
+<pre><span class="c"># Homebrew</span>
+brew install node@22 git
+<span class="c"># git also comes with the Xcode command line tools:</span>
+xcode-select --install</pre>
+        <p class="micro" style="margin-top:16px">Windows</p>
+<pre><span class="c"># in PowerShell — winget ships with Windows 10 and 11</span>
+winget install OpenJS.NodeJS.LTS
+winget install Git.Git
+<span class="c"># then close and reopen PowerShell so PATH picks them up</span></pre>
+        <p style="margin-top:10px; font-size:14px">Prefer installers? Node from
+          <a href="https://nodejs.org/">nodejs.org</a> and Git from
+          <a href="https://git-scm.com/">git-scm.com</a> work just as well. On Windows use
+          PowerShell or Windows Terminal for the rest of these steps.</p>
       </li>
       <li class="rv">
         <h3>Clone the repository</h3>
@@ -407,16 +427,27 @@ cd nosdag-pub</pre>
     </ol>
 
     <div class="callout rv">
-      <strong>Running Tor from source.</strong>
-      <p>If <span class="mono">tor</span> isn't on your PATH, start the app with
-        <span class="mono">TOR_BIN=/path/to/tor npm start</span>.</p>
+      <strong>Optional extras, per system.</strong>
+      <p><span class="mono">ffmpeg</span> lets you attach phone video; <span class="mono">tor</span>
+        is needed for anonymous mode. macOS: <span class="mono">brew install ffmpeg tor</span>.
+        Windows: <span class="mono">winget install Gyan.FFmpeg</span>, and Tor comes from the
+        <a href="https://www.torproject.org/download/tor/">Tor Expert Bundle</a>. Neither is
+        required for everything else to work.</p>
+      <p>If <span class="mono">tor</span> isn't on your PATH, point the app at it — the syntax
+        differs by shell:</p>
+<pre><span class="c"># macOS / Linux</span>
+TOR_BIN=/path/to/tor npm start
+
+<span class="c"># Windows PowerShell</span>
+$env:TOR_BIN="C:\path\to\tor.exe"; npm start</pre>
     </div>
 
     <div class="callout rv">
-      <strong>macOS and Windows aren't built yet.</strong>
-      <p>Only Linux has packaged downloads so far. On other systems the four commands above are
-        the way in — the app itself is cross-platform, it just hasn't been packaged or tested
-        there yet.</p>
+      <strong>Untested on macOS and Windows.</strong>
+      <p>Nosdag is an Electron app, so these steps should work on both — but development and
+        testing happen on Linux, and nobody has yet confirmed a clean run on either. If you try
+        it, an <a href="https://github.com/grahamonero/nosdag-pub/issues">issue report</a> either
+        way is genuinely useful.</p>
     </div>
   </div>
 </section>
