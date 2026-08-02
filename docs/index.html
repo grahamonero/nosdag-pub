@@ -224,7 +224,7 @@ footer .sp{margin-left:auto}
     <span class="brand"><img src="nosdag-icon.png" alt="">Nosdag</span>
     <nav>
       <a href="#what" class="hide-sm">What it is</a>
-      <a href="#run">Run it</a>
+      <a href="#download">Download</a>
       <a href="#faq">FAQ</a>
       <a href="https://github.com/grahamonero/nosdag-pub">Source</a>
     </nav>
@@ -241,8 +241,8 @@ footer .sp{margin-left:auto}
         your relays, your notes readable in every other client — and adds an IPFS node inside the
         app so the data itself lives on your machine instead of somebody's server.</p>
       <div class="cta">
-        <a class="btn" href="#run">Run it from source</a>
-        <a class="btn btn-quiet" href="https://github.com/grahamonero/nosdag-pub/releases">Releases</a>
+        <a class="btn" href="#download">Download for Linux</a>
+        <a class="btn btn-quiet" href="#run">Or run from source</a>
       </div>
     </div>
 
@@ -321,13 +321,64 @@ footer .sp{margin-left:auto}
 
 <hr class="rule">
 
+<section id="download">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <p class="micro">Download</p>
+      <h2>Linux builds, version 0.1.0</h2>
+      <p>Pick whichever suits your system. All three are the same app, x86_64, and nothing is
+        code-signed yet — your desktop may warn you about an unknown publisher.</p>
+    </div>
+
+    <div class="cards">
+      <div class="card rv">
+        <p class="micro">Recommended</p>
+        <h3>AppImage</h3>
+        <p>Portable, nothing to install. Download, make it executable, run it.</p>
+        <p style="margin-top:14px"><a class="btn" href="https://github.com/grahamonero/nosdag-pub/releases/download/v0.1.0/Nosdag-0.1.0-x86_64.AppImage">Download AppImage</a></p>
+<pre style="margin-top:14px">chmod +x Nosdag-0.1.0-x86_64.AppImage
+./Nosdag-0.1.0-x86_64.AppImage</pre>
+      </div>
+      <div class="card rv">
+        <p class="micro">Debian · Ubuntu · Mint · Zorin</p>
+        <h3>.deb package</h3>
+        <p>Installs to your applications menu like any other package.</p>
+        <p style="margin-top:14px"><a class="btn" href="https://github.com/grahamonero/nosdag-pub/releases/download/v0.1.0/nosdag_0.1.0_amd64.deb">Download .deb</a></p>
+<pre style="margin-top:14px">sudo apt install ./nosdag_0.1.0_amd64.deb</pre>
+        <p style="margin-top:10px; font-size:14px">Keep the <span class="mono">./</span> — it tells
+          apt to install the local file. Plain <span class="mono">apt install nosdag</span> won't
+          work; Nosdag isn't in an APT repository.</p>
+      </div>
+      <div class="card rv">
+        <p class="micro">Any other distro</p>
+        <h3>tar.gz</h3>
+        <p>Extract it anywhere and run the <span class="mono">nosdag</span> binary inside.</p>
+        <p style="margin-top:14px"><a class="btn btn-quiet" href="https://github.com/grahamonero/nosdag-pub/releases/download/v0.1.0/nosdag-0.1.0.tar.gz">Download tar.gz</a>
+          <a class="btn btn-quiet" href="https://github.com/grahamonero/nosdag-pub/releases">All releases</a></p>
+        <p style="margin-top:14px; font-size:14px">Check what you downloaded against
+          <a href="https://github.com/grahamonero/nosdag-pub/releases/download/v0.1.0/SHA256SUMS.txt">SHA256SUMS.txt</a>:
+          <span class="mono">sha256sum -c SHA256SUMS.txt --ignore-missing</span></p>
+      </div>
+    </div>
+
+    <div class="callout rv">
+      <strong>Optional extras.</strong>
+      <p><span class="mono">ffmpeg</span> on your PATH lets you attach video from a phone — Nosdag
+        strips the metadata and converts it so everyone can play it. <span class="mono">tor</span>
+        is needed for anonymous mode; without it, everything else still works.</p>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
 <section id="run">
   <div class="wrap">
     <div class="sec-head rv">
-      <p class="micro">Run it</p>
+      <p class="micro">Or run from source</p>
       <h2>From source, in four commands</h2>
-      <p>There are no packaged installers yet — running from source is the way in right now, and
-        it takes about a minute on a machine that already has Node.</p>
+      <p>Prefer to read the code before you run it, or on a distro the builds don't suit? This
+        takes about a minute on a machine that already has Node.</p>
     </div>
 
     <ol class="steps">
@@ -356,19 +407,16 @@ cd nosdag-pub</pre>
     </ol>
 
     <div class="callout rv">
-      <strong>Optional extras.</strong>
-      <p><span class="mono">ffmpeg</span> on your PATH lets you attach video from a phone — Nosdag
-        strips the metadata and converts it so everyone can play it. <span class="mono">tor</span>
-        is needed for anonymous mode; if it is not on your PATH, start the app with
+      <strong>Running Tor from source.</strong>
+      <p>If <span class="mono">tor</span> isn't on your PATH, start the app with
         <span class="mono">TOR_BIN=/path/to/tor npm start</span>.</p>
     </div>
 
     <div class="callout rv">
-      <strong>Packaged builds are not out yet.</strong>
-      <p>Installers for Linux, macOS, and Windows are the next thing being built. When they exist
-        they will appear on the
-        <a href="https://github.com/grahamonero/nosdag-pub/releases">releases page</a> — until then
-        that page will be empty, and the four commands above are the honest answer.</p>
+      <strong>macOS and Windows aren't built yet.</strong>
+      <p>Only Linux has packaged downloads so far. On other systems the four commands above are
+        the way in — the app itself is cross-platform, it just hasn't been packaged or tested
+        there yet.</p>
     </div>
   </div>
 </section>
@@ -387,8 +435,8 @@ cd nosdag-pub</pre>
         <summary>Is Nosdag finished?</summary>
         <div class="a">
           <p>No. It works — notes, media, threads, tips, Tor mode and history backup are all built
-            and used daily — but it is pre-release software without packaged installers, and
-            anonymous mode in particular is experimental. Treat it as something to try, not
+            and used daily — but it is pre-release software: Linux builds only, nothing code-signed,
+            no auto-updates, and anonymous mode in particular is experimental. Treat it as something to try, not
             somewhere to put your only copy of anything.</p>
         </div>
       </details>
