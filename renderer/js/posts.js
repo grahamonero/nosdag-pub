@@ -33,6 +33,9 @@ export function getParentPostRelays() {
 // selection order (each ref on its own line, so the feed renders them one under another).
 const MAX_MEDIA_FILES = 10;
 let currentMediaFiles = [];
+// Object URLs backing the attachment previews — revoked on every preview re-render so a
+// removed or published attachment releases its backing file.
+let mediaPreviewUrls = [];
 
 // Global variables for streaming home feed
 let currentHomeFeedResults = [];
@@ -5613,6 +5616,9 @@ function showMediaPreview(context) {
     const preview = document.getElementById(previewId);
     if (!preview) return;
 
+    mediaPreviewUrls.forEach((u) => URL.revokeObjectURL(u));
+    mediaPreviewUrls = [];
+
     if (!currentMediaFiles.length) {
         preview.style.display = 'none';
         preview.innerHTML = '';
@@ -5631,17 +5637,18 @@ function showMediaPreview(context) {
     }).join('');
 
     currentMediaFiles.forEach((file, i) => {
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            const content = document.getElementById(`${context}MediaContent${i}`);
-            if (!content) return;
-            if (file.type.startsWith('image/')) {
-                content.innerHTML = `<img src="${e.target.result}" alt="Preview">`;
-            } else { // everything past the gate that isn't an image is video (incl. no-MIME .mov)
-                content.innerHTML = `<video controls><source src="${e.target.result}" type="${file.type || 'video/quicktime'}"></video>`;
-            }
-        };
-        reader.readAsDataURL(file);
+        const content = document.getElementById(`${context}MediaContent${i}`);
+        if (!content) return;
+        // Object URL, not a data: URL — the preview streams from disk on demand instead of
+        // buffering + base64-encoding the whole file in renderer memory (which caps
+        // attachment size at RAM and swaps the machine on a multi-GB video).
+        const url = URL.createObjectURL(file);
+        mediaPreviewUrls.push(url);
+        if (file.type.startsWith('image/')) {
+            content.innerHTML = `<img src="${url}" alt="Preview">`;
+        } else { // everything past the gate that isn't an image is video (incl. no-MIME .mov)
+            content.innerHTML = `<video controls preload="metadata"><source src="${url}" type="${file.type || 'video/quicktime'}"></video>`;
+        }
     });
 
     preview.style.display = 'block';

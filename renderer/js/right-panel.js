@@ -2621,6 +2621,11 @@ const RightPanel = {
         const preview = document.getElementById('panelMediaPreview');
         if (!preview) return;
 
+        // Revoke the previous render's object URLs so removed/published attachments
+        // release their backing file.
+        (this.panelPreviewUrls || []).forEach((u) => URL.revokeObjectURL(u));
+        this.panelPreviewUrls = [];
+
         if (!this.currentPanelMedia.length) {
             preview.style.display = 'none';
             preview.innerHTML = '';
@@ -2647,17 +2652,18 @@ const RightPanel = {
 
         // Thumbnails
         this.currentPanelMedia.forEach((file, i) => {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                const content = document.getElementById(`panelMediaContent${i}`);
-                if (!content) return;
-                if (file.type.startsWith('image/')) {
-                    content.innerHTML = `<img src="${e.target.result}" alt="Preview" style="width: 100%; height: auto; display: block;">`;
-                } else { // everything past the gate that isn't an image is video (incl. no-MIME .mov)
-                    content.innerHTML = `<video controls style="width: 100%; max-height: 200px;"><source src="${e.target.result}" type="${file.type || 'video/quicktime'}"></video>`;
-                }
-            };
-            reader.readAsDataURL(file);
+            const content = document.getElementById(`panelMediaContent${i}`);
+            if (!content) return;
+            // Object URL, not a data: URL — the preview streams from disk on demand instead
+            // of buffering + base64-encoding the whole file in renderer memory (which caps
+            // attachment size at RAM and swaps the machine on a multi-GB video).
+            const url = URL.createObjectURL(file);
+            this.panelPreviewUrls.push(url);
+            if (file.type.startsWith('image/')) {
+                content.innerHTML = `<img src="${url}" alt="Preview" style="width: 100%; height: auto; display: block;">`;
+            } else { // everything past the gate that isn't an image is video (incl. no-MIME .mov)
+                content.innerHTML = `<video controls preload="metadata" style="width: 100%; max-height: 200px;"><source src="${url}" type="${file.type || 'video/quicktime'}"></video>`;
+            }
         });
 
         preview.style.display = 'block';
