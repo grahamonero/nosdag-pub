@@ -502,6 +502,16 @@ async function checkExistingSession() {
 
         // Update disclosed tips widget after session restoration
         if (State.publicKey) {
+            // Reload the relay list under the restored pubkey — initializeRelays()
+            // ran before the session keys were known, so it could only see the
+            // anonymous storage slot. Without this, every relaunch runs the whole
+            // session (feed, publishes, Settings) on the default relays.
+            try {
+                await Relays.loadUserRelayList();
+            } catch (error) {
+                console.error('Error loading NIP-65 relay list on session restore:', error);
+            }
+
             try {
                 const Posts = await import('./posts.js');
                 await Posts.updateWidgetForAuthState();
@@ -3117,8 +3127,14 @@ async function saveRelayListToRelays() {
     };
 
     const signedEvent = await Utils.signEvent(event);
-    const publishResults = await State.pool.publish(NIP78_STORAGE_RELAYS, signedEvent);
-    console.log('✅ Relay list saved to NIP-78 relay', publishResults);
+    // pool.publish returns one promise per relay; awaiting the bare array does
+    // not wait for (or surface) any of them. Require at least one acceptance.
+    const publishResults = await Promise.allSettled(State.pool.publish(NIP78_STORAGE_RELAYS, signedEvent));
+    if (!publishResults.some(r => r.status === 'fulfilled')) {
+        const reason = publishResults[0]?.reason;
+        throw new Error(`NIP-78 relay rejected the relay-list save: ${reason?.message || reason}`);
+    }
+    console.log('✅ Relay list saved to NIP-78 relay');
 }
 
 async function loadRelayListFromRelays() {
