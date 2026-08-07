@@ -53,7 +53,7 @@ export async function renderHostedFollows (container) {
   }
   const follows = [...(State.followingUsers || [])].filter((pk) => pk !== me)
   const u = AP.usage()
-  const firstRun = u.count === 0
+  const firstRun = u.count === 0 && Object.keys(AP.wantedMap()).length === 0
 
   container.innerHTML = `
   <div class="hf-wrap">
@@ -127,24 +127,34 @@ export async function renderHostedFollows (container) {
       setRowState(rowEl, on ? 'Pinning…' : 'Unpinning…')
       try {
         if (on) {
+          AP.setWant(pk, true) // intent sticks even if this attempt fails — the retry loop takes over
           const res = await AP.hostAccount(pk, (m) => setRowState(rowEl, m))
           if (!res.ok) {
-            input.checked = false
-            // "no-content" (a non-Nosdag account) is normal → neutral text; anything else is an error.
-            setRowState(rowEl, res.error || 'failed', res.reason !== 'no-content')
+            if (AP.isPermanentRefusal(res.reason)) {
+              AP.setWant(pk, false)
+              input.checked = false
+              setRowState(rowEl, res.error || 'failed', 'err')
+            } else {
+              input.checked = true
+              setRowState(rowEl, waitText(pk), 'wait')
+            }
             updateUsage(container)
             input.disabled = false
             return // keep the message — don't refreshRow (it would wipe it)
           }
           refreshRow(container, pk)
         } else {
-          await AP.unhostAccount(pk)
+          await AP.unhostAccount(pk) // also clears the intent
           refreshRow(container, pk)
         }
         updateUsage(container)
       } catch (err) {
-        input.checked = false
-        setRowState(rowEl, String(err?.message || err), true)
+        if (on) {
+          setRowState(rowEl, waitText(pk) || String(err?.message || err), 'wait')
+        } else {
+          input.checked = true
+          setRowState(rowEl, String(err?.message || err), 'err')
+        }
       }
       input.disabled = false
     })
@@ -155,24 +165,32 @@ export async function renderHostedFollows (container) {
       if (!(mb > 0)) return
       AP.setAccountCap(pk, mb)
       if (!AP.isHosted(pk)) return
-      const capInput = ev.currentTarget
-      const tog = rowEl.querySelector('.hf-row-toggle input')
-      capInput.disabled = true; if (tog) tog.disabled = true
-      setRowState(rowEl, 'Updating…')
-      try {
-        await AP.unhostAccount(pk) // unpin all, then re-host newest-first to the new cap
-        const res = await AP.hostAccount(pk, (m) => setRowState(rowEl, m))
-        if (!res.ok) { if (tog) tog.checked = false; setRowState(rowEl, res.error || 'failed', res.reason !== 'no-content') }
-        else refreshRow(container, pk)
-      } catch (err) { setRowState(rowEl, String(err?.message || err), true) }
-      capInput.disabled = false; if (tog) tog.disabled = false
-      updateUsage(container)
+      await rehost(container, rowEl, pk, [ev.currentTarget])
+    })
+
+    // media preference: unchecked = notes only, their media is never pinned
+    rowEl.querySelector('.hf-media')?.addEventListener('change', async (ev) => {
+      AP.setNotesOnly(pk, !ev.currentTarget.checked)
+      if (!AP.isHosted(pk)) return // applies on the next attempt (incl. the retry loop's)
+      await rehost(container, rowEl, pk, [ev.currentTarget])
     })
   })
+
+  // live-update rows when the background retry loop pins (or gives up on) an account
+  if (onAltpinChanged) window.removeEventListener('nosdag:altpin-changed', onAltpinChanged)
+  onAltpinChanged = (e) => {
+    if (!container.isConnected) return
+    const pk = e.detail?.pk
+    if (pk) refreshRow(container, pk)
+    updateUsage(container)
+  }
+  window.addEventListener('nosdag:altpin-changed', onAltpinChanged)
 
   // fill in names/pfps for follows not yet in the profile cache (best-effort, background)
   hydrateProfiles(container, follows.filter((pk) => !profileOf(pk).name && !profileOf(pk).display_name))
 }
+
+let onAltpinChanged = null
 
 function header () {
   return `
@@ -185,22 +203,53 @@ function header () {
   </div>`
 }
 
+// Re-apply hosting under a changed setting (cap / media preference): drop the current pins, then
+// re-host. Intent is re-recorded first so a transient failure leaves the row waiting, not dropped.
+async function rehost (container, rowEl, pk, busyEls = []) {
+  const tog = rowEl.querySelector('.hf-row-toggle input')
+  const els = [tog, ...busyEls].filter(Boolean)
+  els.forEach((el) => { el.disabled = true })
+  setRowState(rowEl, 'Updating…')
+  try {
+    await AP.unhostAccount(pk)
+    AP.setWant(pk, true)
+    const res = await AP.hostAccount(pk, (m) => setRowState(rowEl, m))
+    if (!res.ok) {
+      if (AP.isPermanentRefusal(res.reason)) {
+        AP.setWant(pk, false)
+        if (tog) tog.checked = false
+        setRowState(rowEl, res.error || 'failed', 'err')
+      } else {
+        if (tog) tog.checked = true
+        setRowState(rowEl, waitText(pk), 'wait')
+      }
+    } else refreshRow(container, pk)
+  } catch (err) { setRowState(rowEl, waitText(pk) || String(err?.message || err), 'wait') }
+  els.forEach((el) => { el.disabled = false })
+  updateUsage(container)
+}
+
 function row (pk) {
   const rec = AP.hostedRecord(pk)
   const hosted = !!rec
+  const waiting = !hosted && AP.wantHost(pk)
   return `
   <div class="hf-row" data-pk="${esc(pk)}">
     <div class="hf-av">${pfpOf(pk) ? `<img src="${esc(pfpOf(pk))}" loading="lazy" alt="">` : ''}</div>
     <div class="hf-id">
       <div class="hf-name" data-hf-name>${esc(nameOf(pk))}</div>
-      <div class="hf-meta nd-mono" data-hf-meta>${hosted ? metaText(rec) : shortNpub(pk)}</div>
+      <div class="hf-meta nd-mono ${waiting ? 'hf-meta-wait' : ''}" data-hf-meta>${hosted ? metaText(rec) : (waiting ? esc(waitText(pk)) : shortNpub(pk))}</div>
     </div>
+    <label class="hf-media-opt" title="Pin their media too — unchecked hosts notes only">
+      <input type="checkbox" class="hf-media" ${AP.notesOnly(pk) ? '' : 'checked'}>
+      <span>media</span>
+    </label>
     <div class="hf-capwrap" data-hf-capwrap ${hosted ? '' : 'hidden'}>
       <input type="number" class="hf-cap" min="1" step="10" value="${AP.accountCapMB(pk)}" title="Max to host for this account">
       <i>MB</i>
     </div>
     <label class="hf-switch hf-row-toggle">
-      <input type="checkbox" ${hosted ? 'checked' : ''}>
+      <input type="checkbox" ${hosted || waiting ? 'checked' : ''}>
       <span class="hf-slider"></span>
     </label>
   </div>`
@@ -208,25 +257,43 @@ function row (pk) {
 
 function metaText (rec) {
   if (!rec) return ''
+  if (rec.notesOnly) return `${rec.notes || 0} notes · notes only · ${fmtBytes(rec.bytes || 0)}`
   return `${rec.notes || 0} notes · ${rec.media || 0} media · ${fmtBytes(rec.bytes || 0)}`
 }
 
-function setRowState (rowEl, msg, isErr = false) {
+function waitText (pk) {
+  const w = AP.wantRecord(pk)
+  const why = w?.lastReason === 'no-content'
+    ? 'nothing in IPFS yet'
+    : 'can’t reach them right now'
+  return `Waiting to pin — ${why} · keeps trying while the app runs`
+}
+
+function setRowState (rowEl, msg, tone = '') {
   const meta = rowEl.querySelector('[data-hf-meta]')
   if (!meta) return
-  if (msg) { meta.textContent = msg; meta.classList.toggle('hf-meta-err', isErr) } else { meta.classList.remove('hf-meta-err') }
+  meta.textContent = msg || ''
+  meta.classList.toggle('hf-meta-err', tone === 'err')
+  meta.classList.toggle('hf-meta-wait', tone === 'wait')
 }
 
 function refreshRow (container, pk) {
   const rowEl = container.querySelector(`.hf-row[data-pk="${CSS.escape(pk)}"]`)
   if (!rowEl) return
   const rec = AP.hostedRecord(pk)
+  const waiting = !rec && AP.wantHost(pk)
   const meta = rowEl.querySelector('[data-hf-meta]')
-  if (meta) { meta.classList.remove('hf-meta-err'); meta.textContent = rec ? metaText(rec) : shortNpub(pk) }
+  if (meta) {
+    meta.classList.remove('hf-meta-err')
+    meta.classList.toggle('hf-meta-wait', waiting)
+    meta.textContent = rec ? metaText(rec) : (waiting ? waitText(pk) : shortNpub(pk))
+  }
   const input = rowEl.querySelector('.hf-row-toggle input')
-  if (input) input.checked = !!rec
+  if (input) input.checked = !!rec || waiting
   const cap = rowEl.querySelector('[data-hf-capwrap]')
   if (cap) { cap.hidden = !rec; const ci = cap.querySelector('.hf-cap'); if (ci) ci.value = AP.accountCapMB(pk) }
+  const media = rowEl.querySelector('.hf-media')
+  if (media) media.checked = !AP.notesOnly(pk)
 }
 
 function updateUsage (container) {
@@ -313,6 +380,13 @@ const STYLE = `
 .hf-name{font-size:14px;font-weight:600;color:var(--text-primary,#fff);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hf-meta{margin-top:3px;font-size:11px;color:var(--text-muted,#5d6878);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hf-meta-err{color:#ff5d5d!important}
+.hf-meta-wait{color:var(--nd-rest,#c9973f)!important}
+.hf-media-opt{flex:none;display:flex;align-items:center;gap:5px;border:1px solid var(--nd-line);border-radius:8px;padding:6px 9px;cursor:pointer;transition:.16s;color:var(--text-muted,#5d6878)}
+.hf-media-opt:hover{border-color:var(--nd-accent)}
+.hf-media-opt:has(input:checked){color:var(--text-secondary,#9aa4b4)}
+.hf-media-opt input{margin:0;width:12px;height:12px;cursor:pointer;accent-color:var(--nd-accent)}
+.hf-media-opt input:disabled{cursor:default}
+.hf-media-opt span{font:600 9.5px/1 var(--nd-mono);letter-spacing:.07em;text-transform:uppercase}
 .hf-empty{color:var(--text-muted,#5d6878);font-size:13.5px;text-align:center;padding:30px 10px;line-height:1.6}
 /* switch */
 .hf-switch{position:relative;display:inline-flex;align-items:center;cursor:pointer}

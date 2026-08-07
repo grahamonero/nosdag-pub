@@ -133,9 +133,6 @@ function gateAndStore (ev) {
     parentId
   })
   savePending()
-  // Publish a curation signal for this note so OTHER clients hide the stranger's reply until you
-  // approve it (without a Thread Index on the wire, third readers fall back to the raw thread).
-  ThreadIndex.ensurePublished(parentId).catch(() => {})
   updateBadge()
   renderDeckPanel() // renders npub immediately; backfillProfiles repaints with the name
 }
@@ -230,10 +227,6 @@ async function bringUp () {
     reconcileFollows()
     updateBadge()
     renderDeckPanel()
-    // Ensure a curation signal exists for every note that already has a pending stranger reply, so
-    // other clients hide those replies until you approve them (covers items queued before this — and
-    // the live subscription skips them via the pending dedupe, so it can't publish for them).
-    for (const it of pending.values()) ThreadIndex.ensurePublished(it.parentId).catch(() => {})
     // contacts usually finish loading within a few seconds — re-bucket once they have
     setTimeout(() => { if (reconcileFollows()) { updateBadge(); renderDeckPanel() } }, 4000)
   } finally {

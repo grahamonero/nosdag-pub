@@ -1,7 +1,7 @@
 {
   "name": "nosdag",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Nosdag desktop shell \u2014 Electron app: a clearnet Kubo node or an anonymous Helia-over-Tor node in the main process, behind a privileged app:// renderer.",
   "homepage": "https://nosdag.com",
   "author": "Nosdag contributors <nosdag@nosdag.com>",

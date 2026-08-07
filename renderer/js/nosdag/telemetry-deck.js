@@ -175,6 +175,9 @@ export async function renderTelemetryDeck (container) {
   // Phase 6 — onion discovery: announce our onion pointer in Tor mode + dial followees over Tor
   // on read (idempotent; self-wires login/logout; no-op in clearnet).
   import('./onion-discovery.js').then(OD => OD.init()).catch(() => {})
+  // Phase 3 · Slice 2 — hosting intent retry: keep trying wanted-but-unreachable hosted follows
+  // for as long as the app runs (idempotent; ticks no-op while logged out).
+  import('./altruistic-pin.js').then(AP => AP.initRetry()).catch(() => {})
   await tick()
   renderHosting().catch(() => {}) // Slice 3 — durability ("who hosts you") + no-bridge nudge
   pollTimer = setInterval(() => {

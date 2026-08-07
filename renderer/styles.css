@@ -76,6 +76,15 @@
           --skeleton-highlight: #f0f0f0;
         }
 
+        /* html must own the viewport overflow: if body's overflow:hidden propagates
+           to the viewport instead, body loses its BFC and .app-container's 71px
+           margin-top collapses through it — leaving a permanent 71px document
+           scroll range that scrollIntoView/focus can consume but the user can
+           never scroll back (the viewport shows no scrollbar). */
+        html {
+            overflow: hidden;
+        }
+
         /* Main body styling - Dark theme with flexible layout */
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;

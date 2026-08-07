@@ -66,6 +66,15 @@ export const getActiveRelays = () => {
     return State.relays;
 };
 
+// Notification inbox pool: the user's active set PLUS the public defaults.
+// Mentions/reactions from arbitrary clients mostly land on the big public
+// relays, not the user's NIP-65 read set — a small custom list silently
+// loses notifications. Strict onion-only posture (mirror off) still drops
+// the clearnet additions.
+export const getNotificationRelays = () => {
+    return OnionRelays.filterInbox([...new Set([...getActiveRelays(), ...DEFAULT_RELAYS])]);
+};
+
 // Get write relays only (for publishing) - NIP-65 compliant
 export const getWriteRelays = () => {
     const clearnet = (userRelayList.write && userRelayList.write.length > 0)

@@ -181,24 +181,66 @@ body::before{ content:none; }
   border-bottom:1px solid var(--nd-line);
   gap:8px;
 }
-.feed-tab{
-  font-family:var(--nd-mono) !important;
-  font-size:12.5px !important;
-  color:var(--nd-dim) !important; border-radius:var(--nd-radius) !important;
-  transition:.15s;
+/* ===== tab strips — ONE control idiom for every in-page switcher =====
+   (feed tabs, My Node, Settings panes, Tip Jar). Tab labels are navigation a
+   human reads, so they set in the sans, not the mono, and carry visible button
+   chrome at rest in both worlds — a chromeless or hairline label reads as
+   static text, and users weren't finding these controls at all.
+   Active: wax-sealed in the Ledger, ink-stamped in the Press. */
+.feed-tab, .nd-mn-tab, .nd-set-tab, .nd-wtab{
+  display:inline-flex; align-items:center; gap:7px;
+  font-family:var(--nd-sans) !important;
+  font-size:13.5px !important; font-weight:600 !important; line-height:1;
+  letter-spacing:.01em; text-transform:none;
+  color:var(--nd-txt) !important;
+  background:var(--nd-card) !important;
+  border:1px solid var(--nd-line-2) !important;
+  border-radius:var(--nd-radius) !important;
+  padding:8px 14px !important;
+  cursor:pointer; transition:.15s;
+  text-decoration:none; white-space:nowrap; user-select:none;
 }
-.feed-tab:hover{ color:var(--nd-txt) !important; }
-.feed-tab.active{ color:var(--nd-txt) !important; background:var(--nd-accent-soft) !important; }
-[data-theme="light"] .feed-tab{
-  background:transparent !important;
-  border:2px solid transparent !important;
+.feed-tab:hover, .nd-mn-tab:hover, .nd-set-tab:hover, .nd-wtab:hover{
+  color:var(--nd-txt) !important;
+  background:var(--nd-card2) !important;
+  border-color:color-mix(in srgb, var(--nd-accent) 45%, transparent) !important;
 }
-[data-theme="light"] .feed-tab:hover{ border-color:var(--nd-line) !important; }
-[data-theme="light"] .feed-tab.active{
-  border-color:#17161A !important;
+.feed-tab.active, .nd-mn-tab.on, .nd-set-tab.on, .nd-wtab.on{
+  color:var(--nd-txt) !important;
+  background:var(--nd-accent-soft) !important;
+  border-color:var(--nd-accent) !important;
+  font-weight:700 !important;
+}
+.feed-tab.active:hover{ transform:none; }
+/* the seal marks the open leaf */
+.feed-tab.active::before, .nd-mn-tab.on::before, .nd-set-tab.on::before, .nd-wtab.on::before{
+  content:''; width:7px; height:7px; border-radius:50%; flex:none;
+  background:radial-gradient(circle at 35% 30%, var(--nd-accent-hi), var(--nd-accent) 60%, var(--nd-accent-deep));
+}
+[data-theme="light"] .feed-tab, [data-theme="light"] .nd-mn-tab,
+[data-theme="light"] .nd-set-tab, [data-theme="light"] .nd-wtab{
+  border-width:2px !important; border-color:var(--nd-line) !important;
+  padding:7px 13px !important;
+}
+[data-theme="light"] .feed-tab:hover, [data-theme="light"] .nd-mn-tab:hover,
+[data-theme="light"] .nd-set-tab:hover, [data-theme="light"] .nd-wtab:hover{
+  background:var(--nd-card) !important;
+  border-color:var(--nd-txt) !important;
+}
+[data-theme="light"] .feed-tab.active, [data-theme="light"] .nd-mn-tab.on,
+[data-theme="light"] .nd-set-tab.on, [data-theme="light"] .nd-wtab.on{
+  border-color:var(--nd-txt) !important;
   background:var(--nd-card) !important;
   box-shadow:3px 3px 0 var(--nd-accent);
-  font-weight:700;
+}
+[data-theme="light"] .feed-tab.active::before, [data-theme="light"] .nd-mn-tab.on::before,
+[data-theme="light"] .nd-set-tab.on::before, [data-theme="light"] .nd-wtab.on::before{
+  display:none;
+}
+/* Tip Jar tab strip (buttons are .nd-wtab, built in wallet-modal.js) */
+.nd-wtabs{
+  display:flex; gap:8px; padding:10px 14px;
+  border-bottom:1px solid var(--nd-line);
 }
 
 /* rail cluster dividers (double rule in the Ledger, hard ink line in the Press) */
@@ -217,19 +259,7 @@ body::before{ content:none; }
   border-bottom:1px solid var(--nd-line);
   position:sticky; top:0; z-index:15; background:var(--nd-ground);
 }
-.nd-mn-tab{
-  font-family:var(--nd-mono); font-size:12.5px; color:var(--nd-dim);
-  background:transparent; border:1px solid var(--nd-line); border-radius:var(--nd-radius);
-  padding:.45rem .9rem; cursor:pointer; transition:.15s;
-}
-.nd-mn-tab:hover{ color:var(--nd-txt); }
-.nd-mn-tab.on{ color:var(--nd-txt); background:var(--nd-accent-soft); border-color:transparent; }
-[data-theme="light"] .nd-mn-tab{ border:2px solid transparent; }
-[data-theme="light"] .nd-mn-tab:hover{ border-color:var(--nd-line); }
-[data-theme="light"] .nd-mn-tab.on{
-  border-color:#17161A; background:var(--nd-card);
-  box-shadow:3px 3px 0 var(--nd-accent); font-weight:700;
-}
+/* .nd-mn-tab styling lives in the shared tab-strip block above */
 .nd-mn-gate{
   margin:24px 16px; padding:20px;
   border:var(--nd-card-border); border-top:var(--nd-card-top); box-shadow:var(--nd-card-shadow);
@@ -545,6 +575,12 @@ body::before{ content:none; }
   margin-bottom:10px;
 }
 .nd-unend-item{ margin-bottom:4px; }
+/* non-authors: the same disclosure as information, not a to-do — accent framing
+   drops to the neutral hairline and the replies sit slightly recessed */
+.nd-unend-viewer{ border-color:var(--nd-line-2); background:transparent; }
+.nd-unend-viewer .nd-unend-h{ color:var(--nd-mute); }
+.nd-unend-viewer .nd-unend-item{ opacity:.8; transition:opacity .12s; }
+.nd-unend-viewer .nd-unend-item:hover{ opacity:1; }
 
 /* ===== "media resting" tombstone — mirror-fetch exhausted (design §7) ===== */
 .nd-tombstone{
@@ -648,28 +684,9 @@ body::before{ content:none; }
   background:var(--bg-primary);
   border-bottom:var(--nd-rule);
 }
-.nd-set-tab{
-  font-family:var(--nd-mono); font-size:10.5px; font-weight:500;
-  letter-spacing:.14em; text-transform:uppercase; line-height:1;
-  color:var(--nd-dim); background:transparent; cursor:pointer;
-  border:none; border-left:2px solid transparent; border-radius:var(--nd-radius);
-  padding:8px 12px; transition:.15s; user-select:none;
-}
-.nd-set-tab:hover{ color:var(--nd-txt); }
-.nd-set-tab.on{
-  color:var(--nd-txt);
-  border-left-color:var(--nd-accent);
-  background:linear-gradient(90deg,var(--nd-accent-soft),transparent);
-}
+/* .nd-set-tab styling lives in the shared tab-strip block (feed-selector section) */
 .nd-set-pane{ display:none; }
 .nd-set-pane.on{ display:block; }
-
-[data-theme="light"] .nd-set-tab{ border:2px solid transparent; color:var(--nd-txt); padding:6px 10px; }
-[data-theme="light"] .nd-set-tab:hover{ border-color:var(--nd-line); }
-[data-theme="light"] .nd-set-tab.on{
-  border-color:var(--nd-txt); background:var(--nd-card);
-  box-shadow:3px 3px 0 var(--nd-accent); font-weight:700;
-}
 
 /* ============================ Settings: retokenized controls ============================ */
 

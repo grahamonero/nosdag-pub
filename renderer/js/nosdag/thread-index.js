@@ -97,17 +97,6 @@ export async function add (postId, replyId, { cid = null, relay = '', rootCid = 
   return publish(postId)
 }
 
-/** Make a curation signal exist for a post that received replies, so OTHER clients hide unapproved
- *  strangers (without a published index there's no on-wire signal → they'd render the raw thread).
- *  Publishes an empty index once if none exists yet; no-op if one already does. */
-export async function ensurePublished (postId) {
-  if (!ensureLoaded() || !postId) return null
-  if (myIndexes[postId]) return null                 // already have (and have published) one for this post
-  myIndexes[postId] = { entries: [], updated_at: Math.floor(Date.now() / 1000) }
-  save()
-  return publish(postId)
-}
-
 /** Reversible de-attachment (design §6.4): drop a reply from the index + republish. */
 export async function remove (postId, replyId) {
   if (!ensureLoaded()) return null
@@ -233,14 +222,18 @@ export function partition (order, replyNodes) {
  * Apply the curation overlay to one node's direct replies (design §6.4).
  *  - endorsed replies render first, in the author's index order;
  *  - the AUTHOR additionally sees their followees' replies inline (followees auto-attach, §6.4) even
- *    if not yet in the index, and everyone else's replies as `unendorsed` (their triage queue) — so
- *    a stranger is never on the author's wall pre-approval, with or without a published index;
+ *    if not yet in the index, and everyone else's replies as `unendorsed` (their triage queue);
  *  - a NON-author with no index for this post gets a passthrough (no curation signal on the wire →
- *    raw thread). Once the author publishes an index, non-authors see only endorsed replies.
+ *    raw thread). On an indexed post, non-authors get the endorsed replies as `shown` and the rest
+ *    as `unendorsed` — which the thread renderers display de-emphasized, never hidden.
  * @returns {{ shown:Array, unendorsed:Array, hasIndex:boolean }}
  */
 export function curate (nodePostId, nodeAuthor, replyNodes) {
-  const idx = get(nodePostId, nodeAuthor)
+  let idx = get(nodePostId, nodeAuthor)
+  // An index with zero approvals is no curation signal: hiding on it turns every
+  // reply invisible to every non-author (the wire is full of empty indexes from
+  // the era when a stranger reply auto-published one before any triage happened).
+  if (idx && !idx.order.length) idx = null
   const me = pk()
   const isOwner = !!me && me === nodeAuthor
   const follows = (isOwner && State.followingUsers?.size) ? State.followingUsers : null

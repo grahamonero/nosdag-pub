@@ -1521,35 +1521,53 @@ const RightPanel = {
                 window.NostrState.eventCache[mainNote.id] = mainNote;
             }
 
-            // Find the root of the thread by following 'e' tags
+            // Find the root of the thread by following 'e' tags. NIP-18 'mention'
+            // e-tags (quote reposts) are not thread pointers — resolving one as
+            // "root" walks into the quoted note's thread instead of this one.
             let rootId = noteId;
-            const eTags = mainNote.tags.filter(t => t[0] === 'e');
+            let rootRelayHint = null;
+            const eTags = mainNote.tags.filter(t => t[0] === 'e' && t[3] !== 'mention');
             // Look for root marker first
             for (const tag of eTags) {
                 if (tag[3] === 'root') {
                     rootId = tag[1];
+                    rootRelayHint = tag[2] || null;
                     break;
                 }
             }
             // If no root marker, use first 'e' tag (oldest ancestor reference)
             if (rootId === noteId && eTags.length > 0) {
                 rootId = eTags[0][1];
+                rootRelayHint = eTags[0][2] || null;
             }
 
-            // Fetch the root note if different from clicked note
+            // The e-tag relay hint is often the only relay that carries the root
+            // (the root author's outbox may not overlap our read set at all).
+            const threadRelays = (rootRelayHint && /^wss?:\/\//.test(rootRelayHint))
+                ? [...new Set([rootRelayHint, ...relays])]
+                : relays;
+
+            // Fetch the root note if different from clicked note (cache first —
+            // the feed/search already hold verified events from relays we may
+            // not be able to refetch from)
             let rootNote = mainNote;
             if (rootId !== noteId) {
-                const rootEvents = await pool.querySync(relays, { ids: [rootId] });
-                if (rootEvents?.length > 0) {
-                    rootNote = rootEvents[0];
+                rootNote = window.NostrState?.eventCache?.[rootId] || null;
+                if (!rootNote) {
+                    const rootEvents = await pool.querySync(threadRelays, { ids: [rootId] });
+                    rootNote = (rootEvents?.length > 0) ? rootEvents[0] : null;
+                }
+                if (rootNote) {
                     if (window.NostrState?.eventCache) {
                         window.NostrState.eventCache[rootNote.id] = rootNote;
                     }
+                } else {
+                    rootNote = mainNote;
                 }
             }
 
             // Fetch all replies to the root (this gets the entire thread)
-            const replies = await pool.querySync(relays, {
+            const replies = await pool.querySync(threadRelays, {
                 kinds: [1],
                 '#e': [rootId],
                 limit: LIMITS.THREAD_REPLIES
@@ -1558,7 +1576,7 @@ const RightPanel = {
             // Also fetch replies to the clicked note if it's not the root
             let clickedReplies = [];
             if (noteId !== rootId) {
-                clickedReplies = await pool.querySync(relays, {
+                clickedReplies = await pool.querySync(threadRelays, {
                     kinds: [1],
                     '#e': [noteId],
                     limit: Math.floor(LIMITS.THREAD_REPLIES / 2)
@@ -1571,6 +1589,13 @@ const RightPanel = {
             allPostsMap.set(mainNote.id, mainNote);
             replies.forEach(r => allPostsMap.set(r.id, r));
             clickedReplies.forEach(r => allPostsMap.set(r.id, r));
+
+            // An unreachable root must not blank the view: buildTree keys the whole
+            // tree on rootId, so a missing root event would drop every node. Re-key
+            // on the clicked note and render what we have.
+            if (!allPostsMap.has(rootId)) {
+                rootId = mainNote.id;
+            }
 
             // Second pass: fetch replies to replies (notes might only reference their direct parent)
             // Get IDs of all notes we've found so far (excluding root which we already queried)
@@ -1642,8 +1667,9 @@ const RightPanel = {
 
                 // Link children to parents
                 posts.forEach(post => {
-                    // Find the parent ID (last 'e' tag with marker 'reply' or just the last 'e' tag)
-                    const eTags = post.tags.filter(t => t[0] === 'e');
+                    // Find the parent ID (last 'e' tag with marker 'reply' or just
+                    // the last 'e' tag; 'mention' e-tags are quotes, not parents)
+                    const eTags = post.tags.filter(t => t[0] === 'e' && t[3] !== 'mention');
                     let parentId = null;
                     for (const tag of eTags) {
                         if (tag[3] === 'reply') {
@@ -1737,12 +1763,14 @@ const RightPanel = {
                     }
                 }
 
-                if (isOwner && curated.unendorsed.length) {
-                    nodeHtml += CurateUI.unendorsedOpen(curated.unendorsed.length, childIndent);
+                if (curated.unendorsed.length) {
+                    nodeHtml += CurateUI.unendorsedOpen(curated.unendorsed.length, childIndent, isOwner);
                     for (const childNode of curated.unendorsed) {
                         nodeHtml += '<div class="nd-unend-item">';
                         nodeHtml += await renderNode(childNode, depth + 1, node);
-                        nodeHtml += CurateUI.triageBar(node.post.id, childNode.post.id, childNode.post.pubkey, childIndent);
+                        if (isOwner) {
+                            nodeHtml += CurateUI.triageBar(node.post.id, childNode.post.id, childNode.post.pubkey, childIndent);
+                        }
                         nodeHtml += '</div>';
                     }
                     nodeHtml += CurateUI.unendorsedClose();

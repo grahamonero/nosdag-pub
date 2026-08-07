@@ -24,11 +24,15 @@ export function triageBar (parentId, replyId, author, indent) {
   </div>`
 }
 
-// Open/close the author-only "unendorsed replies (N)" disclosure that wraps the triaged replies.
-export function unendorsedOpen (count, indent) {
+// Open/close the "unendorsed replies (N)" disclosure wrapping replies the node's author hasn't
+// endorsed. The author triages them here; everyone else sees them de-emphasized — visible, but
+// below the endorsed replies and marked as outside the author's curation.
+export function unendorsedOpen (count, indent, forOwner = true) {
   const noun = count === 1 ? 'reply' : 'replies'
-  const dem = count === 1 ? 'this' : 'these'
-  return `<div class="nd-unend" style="margin-left:${indent}px"><div class="nd-unend-h nd-mono">⌁ ${count} unendorsed ${noun} · only you see ${dem}</div>`
+  const label = forOwner
+    ? `⌁ ${count} unendorsed ${noun}`
+    : `⌁ ${count} ${noun} not endorsed by the author`
+  return `<div class="nd-unend${forOwner ? '' : ' nd-unend-viewer'}" style="margin-left:${indent}px"><div class="nd-unend-h nd-mono">${label}</div>`
 }
 export function unendorsedClose () { return '</div>' }
 

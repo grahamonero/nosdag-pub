@@ -298,10 +298,11 @@ function ensureWalletTabs() {
 
         const strip = document.createElement('div');
         strip.id = 'ndWalletTabs';
-        strip.style.cssText = 'display: flex; gap: 4px; padding: 0 20px; background: #0a0a0a; border-bottom: 1px solid var(--border-color); flex-shrink: 0;';
+        strip.className = 'nd-wtabs';
+        strip.style.flexShrink = '0';
         strip.innerHTML = `
-            <button id="ndWalletTabWallet" style="background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-secondary); padding: 10px 14px; font-size: 14px; cursor: pointer;">Wallet</button>
-            <button id="ndWalletTabQueue" style="background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-secondary); padding: 10px 14px; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;">
+            <button id="ndWalletTabWallet" class="nd-wtab">Wallet</button>
+            <button id="ndWalletTabQueue" class="nd-wtab">
                 Tip Queue
                 <span id="ndQueueTabCount" style="display: none; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--nd-accent); color: var(--nd-on-accent); font-size: 11px; font-weight: 700; align-items: center; justify-content: center;">0</span>
             </button>
@@ -318,14 +319,8 @@ function ensureWalletTabs() {
  * Highlight the active tab in the strip
  */
 function setActiveWalletTab(tab) {
-    const paint = (btn, active) => {
-        if (!btn) return;
-        btn.style.color = active ? 'var(--nd-accent)' : 'var(--text-secondary)';
-        btn.style.borderBottomColor = active ? 'var(--nd-accent)' : 'transparent';
-        btn.style.fontWeight = active ? '600' : '400';
-    };
-    paint(document.getElementById('ndWalletTabWallet'), tab === 'wallet');
-    paint(document.getElementById('ndWalletTabQueue'), tab === 'queue');
+    document.getElementById('ndWalletTabWallet')?.classList.toggle('on', tab === 'wallet');
+    document.getElementById('ndWalletTabQueue')?.classList.toggle('on', tab === 'queue');
 }
 
 /**

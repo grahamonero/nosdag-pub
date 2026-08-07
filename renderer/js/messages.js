@@ -1077,7 +1077,7 @@ export async function fetchNotifications() {
         }
 
         // Include Nosmero relay for kind 9736 tip disclosures
-        const relaysToQuery = [...Relays.getActiveRelays()];
+        const relaysToQuery = [...Relays.getNotificationRelays()];
         const nosmeroRelay = Relays.getNosmeroRelay();
         if (!relaysToQuery.includes(nosmeroRelay)) {
             relaysToQuery.push(nosmeroRelay);

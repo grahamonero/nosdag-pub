@@ -390,14 +390,16 @@ export async function openThreadView(eventId, skipHistory = false) {
                 }
             }
 
-            // Unendorsed (stranger) direct replies: hidden from everyone EXCEPT the author, who
-            // triages them inline. Non-authors never see this block.
-            if (isOwner && curated.unendorsed.length) {
-                html += CurateUI.unendorsedOpen(curated.unendorsed.length, childIndent);
+            // Unendorsed direct replies render below the endorsed set for everyone: the author
+            // triages them inline; other viewers see them de-emphasized.
+            if (curated.unendorsed.length) {
+                html += CurateUI.unendorsedOpen(curated.unendorsed.length, childIndent, isOwner);
                 for (const reply of curated.unendorsed) {
                     html += '<div class="nd-unend-item">';
                     html += await renderThreadNode(reply, depth + 1, node);
-                    html += CurateUI.triageBar(node.post.id, reply.post.id, reply.post.pubkey, childIndent);
+                    if (isOwner) {
+                        html += CurateUI.triageBar(node.post.id, reply.post.id, reply.post.pubkey, childIndent);
+                    }
                     html += '</div>';
                 }
                 html += CurateUI.unendorsedClose();
